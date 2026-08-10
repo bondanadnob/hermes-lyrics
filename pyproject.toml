@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-apple-music-lyrics"
+version = "0.1.0"
+description = "Synchronized Apple Music lyrics for Hermes Desktop"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115"]
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.9"]
+
+[project.urls]
+Repository = "https://github.com/bondanadnob/hermes-apple-music-lyrics"
+Issues = "https://github.com/bondanadnob/hermes-apple-music-lyrics/issues"
+
+[tool.setuptools]
+packages = ["dashboard", "dashboard.apple_music_lyrics_backend"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
