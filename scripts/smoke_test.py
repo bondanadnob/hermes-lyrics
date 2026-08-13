@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -18,29 +19,43 @@ from dashboard.apple_music_lyrics_backend.music import MusicClient  # noqa: E402
 from dashboard.apple_music_lyrics_backend.service import LyricsService  # noqa: E402
 
 
-def main() -> int:
-    state = LyricsService(
-        music=MusicClient(),
-        providers=(AppleMusicCacheProvider(), LRCLIBProvider()),
-    ).state()
+def privacy_safe_summary(state: dict) -> dict:
     track = state.get("track") or {}
     lyrics = state.get("lyrics") or {}
-    summary = {
-        "status": state.get("status"),
-        "track": {
-            "title": track.get("title"),
-            "artist": track.get("artist"),
-            "state": track.get("state"),
-            "duration": track.get("duration"),
+    artwork = state.get("artwork") or {}
+    identity = str(track.get("identity") or "")
+    status = state.get("status")
+    return {
+        "backend": {
+            "ready": status == "ready",
+            "permission_required": status == "permission_required",
+            "error": status == "error",
         },
+        "playback": {
+            "music_running": bool(track.get("running")),
+            "playing": track.get("state") == "playing",
+            "private_identity_valid": re.fullmatch(r"[0-9a-f]{24}", identity)
+            is not None,
+        },
+        "remote_artwork_fallback_available": bool(artwork.get("remote_url")),
         "lyrics": {
-            "source": lyrics.get("source"),
-            "synced": lyrics.get("synced"),
-            "word_timing": lyrics.get("word_timing"),
-            "line_count": len(lyrics.get("lines") or []),
+            "available": status == "ready",
+            "synced": bool(lyrics.get("synced")),
+            "word_timed": lyrics.get("word_timing") not in {None, "none"},
         },
+        "lyric_text_emitted": False,
+        "track_metadata_emitted": False,
     }
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+def main() -> int:
+    apple_cache = AppleMusicCacheProvider()
+    state = LyricsService(
+        music=MusicClient(),
+        providers=(apple_cache, LRCLIBProvider()),
+        artwork_provider=apple_cache,
+    ).state()
+    print(json.dumps(privacy_safe_summary(state), indent=2, ensure_ascii=False))
     return 1 if state.get("status") in {"error", "permission_required"} else 0
 
 

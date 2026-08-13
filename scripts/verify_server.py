@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dashboard.plugin_api import router
 
 EXPECTED_ROUTES = {
+    "/artwork",
     "/control",
     "/health",
     "/permissions",

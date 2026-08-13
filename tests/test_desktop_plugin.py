@@ -57,6 +57,65 @@ class DesktopPluginContractTests(unittest.TestCase):
         self.assertNotRegex(source, r"\brgb(?:a)?\(")
         self.assertIn("var(--ui-accent)", source)
 
+    def test_seek_focus_ring_uses_a_shipped_host_utility(self):
+        source = PLUGIN.read_text(encoding="utf-8")
+
+        self.assertIn("focus-visible:ring-ring/40", source)
+        self.assertNotRegex(source, r"focus-visible:ring-ring(?:\\s|['\"])")
+
+    def test_music_artwork_is_loaded_independently_of_the_lyrics_provider(self):
+        source = PLUGIN.read_text(encoding="utf-8")
+
+        self.assertIn("function useMusicArtwork", source)
+        self.assertIn("/artwork?identity=", source)
+        self.assertRegex(
+            source,
+            r"const localArtworkUrl\s*=\s*useMemo\(\s*\(\) => safeArtworkUrl\(artworkQuery\.data\?\.data_url\)",
+        )
+        self.assertIn("data?.artwork?.remote_url", source)
+        self.assertIn("selectArtworkSources", source)
+        self.assertIn("artworkUrl", source)
+        self.assertNotIn("url: lyrics?.artwork_url", source)
+        self.assertIn("hostname.endsWith('.mzstatic.com')", source)
+        self.assertIn("!parsed.username", source)
+        self.assertIn("!parsed.password", source)
+        self.assertIn("parsed.port === '' || parsed.port === '443'", source)
+        self.assertIn("data:image/(?:jpeg|png);base64", source)
+
+    def test_artwork_cache_is_bounded_and_refresh_is_profile_scoped(self):
+        source = PLUGIN.read_text(encoding="utf-8")
+
+        self.assertIn("const artworkProfileQueryKey", source)
+        self.assertIn("staleTime: 300000", source)
+        self.assertIn("gcTime: 10000", source)
+        self.assertIn("retry: artworkRetry", source)
+        self.assertIn("refetchOnMount: false", source)
+        self.assertIn(
+            "queryKey: artworkProfileQueryKey(ctx, profile)",
+            source,
+        )
+
+    def test_artwork_validation_and_decode_failure_preserve_apple_fallback(self):
+        source = PLUGIN.read_text(encoding="utf-8")
+
+        self.assertIn("if (value.length > 2048) return null", source)
+        self.assertIn("function Artwork({ url, fallbackUrl, compact })", source)
+        self.assertIn("fallbackUrl: artworkFallbackUrl", source)
+        self.assertIn("candidates.find", source)
+        self.assertGreaterEqual(source.count("() => safeArtworkUrl"), 4)
+
+    def test_artwork_query_and_fallback_runtime_contract(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        completed = subprocess.run(
+            [node, str(ROOT / "tests" / "desktop_artwork_runtime.mjs")],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

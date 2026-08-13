@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 from dataclasses import asdict, dataclass
 
 
@@ -36,6 +38,18 @@ class LyricsDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtworkPayload:
+    identity: str
+    data_url: str
+    mime: str
+    byte_length: int
+    source: str = "Music.app"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class TrackInfo:
     running: bool
     state: str
@@ -47,6 +61,8 @@ class TrackInfo:
     plain_lyrics: str = ""
     sampled_at: float = 0.0
     error: str | None = None
+    persistent_id: str = ""
+    database_id: str = ""
 
     @property
     def key(self) -> str:
@@ -59,7 +75,29 @@ class TrackInfo:
             ]
         )
 
+    @property
+    def identity(self) -> str:
+        if self.persistent_id.strip():
+            material = f"persistent:{self.persistent_id.casefold().strip()}"
+        elif self.database_id.strip():
+            material = f"database:{self.database_id.casefold().strip()}"
+        else:
+            duration = self.duration if math.isfinite(self.duration) else 0.0
+            metadata = "\u241f".join(
+                [
+                    self.title.casefold().strip(),
+                    self.artist.casefold().strip(),
+                    self.album.casefold().strip(),
+                    str(round(duration * 1000)),
+                ]
+            )
+            material = f"metadata:{metadata}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
     def to_dict(self) -> dict:
         data = asdict(self)
         data.pop("plain_lyrics", None)
+        data.pop("persistent_id", None)
+        data.pop("database_id", None)
+        data["identity"] = self.identity
         return data

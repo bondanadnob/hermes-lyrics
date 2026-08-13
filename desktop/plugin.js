@@ -20,6 +20,19 @@ const ROUTE = '/apple-music-lyrics'
 const PROFILE_CHANGED_ERROR = 'Active Hermes profile changed during Apple Music request'
 
 const queryKey = (ctx, profile) => [ID, ctx.source, profile || 'default', 'state']
+const artworkProfileQueryKey = (ctx, profile) => [
+  ID,
+  ctx.source,
+  profile || 'default',
+  'artwork'
+]
+const artworkQueryKey = (ctx, profile, identity) => [
+  ...artworkProfileQueryKey(ctx, profile),
+  identity || 'none'
+]
+const LOCAL_ARTWORK_PATTERN = new RegExp(
+  '^data:image/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2}$'
+)
 const assertActiveProfile = profile => {
   if (host.state.profile.get() !== profile) {
     throw new Error(PROFILE_CHANGED_ERROR)
@@ -64,7 +77,42 @@ function useMusicState(ctx, profile) {
     },
     refetchInterval: 2000,
     staleTime: 750,
-    retry: 1
+    retry: false
+  })
+}
+
+function useMusicArtwork(ctx, profile, identity, enabled) {
+  return useQuery({
+    queryKey: artworkQueryKey(ctx, profile, identity),
+    queryFn: async () => {
+      assertActiveProfile(profile)
+      const response = await ctx.rest(
+        `/artwork?identity=${encodeURIComponent(identity)}`,
+        { timeoutMs: 12000 }
+      )
+      assertActiveProfile(profile)
+      const artwork = response?.artwork
+      if (
+        !artwork ||
+        typeof artwork !== 'object' ||
+        artwork.identity !== identity ||
+        typeof artwork.data_url !== 'string' ||
+        !artwork.data_url.startsWith('data:image/') ||
+        safeArtworkUrl(artwork.data_url) !== artwork.data_url
+      ) {
+        throw new Error('Invalid artwork response from Apple Music Lyrics backend')
+      }
+      return artwork
+    },
+    enabled: Boolean(identity && enabled),
+    staleTime: 300000,
+    gcTime: 10000,
+    retry: artworkRetry,
+    retryOnMount: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retryDelay: attempt => Math.min(4000, 2000 * 2 ** attempt)
   })
 }
 
@@ -105,19 +153,88 @@ function ActionButton({ label, children, disabled, onClick }) {
   })
 }
 
-function Artwork({ url, compact }) {
-  const [failed, setFailed] = useState(false)
+function safeArtworkUrl(value) {
+  if (typeof value !== 'string' || !value) return null
+  if (value.length <= 2700000 && LOCAL_ARTWORK_PATTERN.test(value)) {
+    const payload = value.slice(value.indexOf(',') + 1)
+    if (payload.length % 4 !== 0) return null
+    const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    if (padding === 1 && alphabet.indexOf(payload.at(-2)) % 4 !== 0) return null
+    if (padding === 2 && alphabet.indexOf(payload.at(-3)) % 16 !== 0) return null
+    const decodedBytes = (payload.length / 4) * 3 - padding
+    return decodedBytes <= 2000000 ? value : null
+  }
+  if (value.length > 2048) return null
+  try {
+    const parsed = new URL(value)
+    const hostname = parsed.hostname.toLowerCase()
+    if (
+      parsed.protocol === 'https:' &&
+      !parsed.username &&
+      !parsed.password &&
+      (parsed.port === '' || parsed.port === '443') &&
+      (hostname === 'mzstatic.com' || hostname.endsWith('.mzstatic.com'))
+    ) {
+      return parsed.href
+    }
+  } catch (_) {}
+  return null
+}
+
+function restErrorStatus(error) {
+  const message = error instanceof Error ? error.message : String(error || '')
+  let status = null
+  for (const match of message.matchAll(/(?:^|:\s)([45]\d{2}):(?=\s|$)/g)) {
+    status = Number(match[1])
+  }
+  return status
+}
+
+function artworkRetry(failureCount, error) {
+  return failureCount < 2 && restErrorStatus(error) === 503
+}
+
+function selectArtworkSources(artworkQuery, remoteUrl, validatedLocalUrl) {
+  const localUrl = validatedLocalUrl ?? safeArtworkUrl(artworkQuery?.data?.data_url)
+  const remote = safeArtworkUrl(remoteUrl)
+  const settled = Boolean(artworkQuery?.isSuccess || artworkQuery?.isError)
+  if (!settled) return { url: null, fallbackUrl: null }
+  const errorMessage =
+    artworkQuery?.error instanceof Error
+      ? artworkQuery.error.message
+      : String(artworkQuery?.error || '')
+  if (
+    restErrorStatus(artworkQuery?.error) === 409 ||
+    errorMessage === PROFILE_CHANGED_ERROR
+  ) {
+    return { url: null, fallbackUrl: null }
+  }
+  if (artworkQuery?.isError) return { url: remote, fallbackUrl: null }
+  if (localUrl) return { url: localUrl, fallbackUrl: remote }
+  return { url: remote, fallbackUrl: null }
+}
+
+function Artwork({ url, fallbackUrl, compact }) {
+  const safeUrl = useMemo(() => safeArtworkUrl(url), [url])
+  const safeFallbackUrl = useMemo(() => safeArtworkUrl(fallbackUrl), [fallbackUrl])
+  const candidates = useMemo(
+    () => [safeUrl, safeFallbackUrl].filter((value, index, all) => value && all.indexOf(value) === index),
+    [safeFallbackUrl, safeUrl]
+  )
+  const [failed, setFailed] = useState([])
+  const activeUrl = candidates.find(candidate => !failed.includes(candidate))
   const size = compact ? '3.5rem' : '5rem'
   const style = { height: size, width: size }
-  useEffect(() => setFailed(false), [url])
-  if (url && !failed) {
+  useEffect(() => setFailed([]), [candidates])
+  if (activeUrl) {
     return jsx('img', {
-      src: url,
+      src: activeUrl,
       alt: '',
       loading: 'lazy',
       decoding: 'async',
       referrerPolicy: 'no-referrer',
-      onError: () => setFailed(true),
+      onError: () => setFailed(current => [...current, activeUrl]),
       className: 'shrink-0 rounded-xl object-cover shadow-sm',
       style
     })
@@ -145,7 +262,7 @@ function SourcePill({ lyrics }) {
   })
 }
 
-function PlayerHeader({ compact, lyrics, position, runAction, runSeek, track, working }) {
+function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, position, refresh, runAction, runSeek, track, working }) {
   const percentage = track.duration
     ? clamp((position / track.duration) * 100, 0, 100)
     : 0
@@ -178,7 +295,7 @@ function PlayerHeader({ compact, lyrics, position, runAction, runSeek, track, wo
       jsxs('div', {
         className: 'flex min-w-0 items-center gap-3',
         children: [
-          jsx(Artwork, { url: lyrics?.artwork_url, compact }),
+          jsx(Artwork, { url: artworkUrl, fallbackUrl, compact }),
           jsxs('div', {
             className: 'min-w-0 flex-1',
             children: [
@@ -223,6 +340,12 @@ function PlayerHeader({ compact, lyrics, position, runAction, runSeek, track, wo
             disabled: working,
             onClick: () => runAction('next'),
             children: '▶▶'
+          }),
+          jsx(ActionButton, {
+            label: 'Refresh lyrics and artwork',
+            disabled: working,
+            onClick: refresh,
+            children: '↻'
           })
         ]
       }),
@@ -239,7 +362,7 @@ function PlayerHeader({ compact, lyrics, position, runAction, runSeek, track, wo
         onKeyDown: seekFromKeyboard,
         className: cn(
           'mt-2 block h-2 w-full rounded-full bg-(--ui-stroke-secondary)',
-          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
           working ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
         ),
         children: jsx('span', {
@@ -480,7 +603,35 @@ function MusicExperience({ ctx, compact = false }) {
   const profile = useValue(host.state.profile)
   const query = useMusicState(ctx, profile)
   const queryClient = useQueryClient()
-  const data = query.data
+  const data = query.isError ? undefined : query.data
+  const cachedArtworkUrl = useMemo(
+    () => safeArtworkUrl(data?.artwork?.remote_url),
+    [data?.artwork?.remote_url]
+  )
+  const artworkIdentity = data?.track?.identity || ''
+  const artworkQuery = useMusicArtwork(
+    ctx,
+    profile,
+    artworkIdentity,
+    Boolean(data?.track?.title)
+  )
+  const localArtworkUrl = useMemo(
+    () => safeArtworkUrl(artworkQuery.data?.data_url),
+    [artworkQuery.data?.data_url]
+  )
+  const artworkSources = useMemo(
+    () => selectArtworkSources(artworkQuery, cachedArtworkUrl, localArtworkUrl),
+    [
+      artworkQuery.data?.data_url,
+      artworkQuery.error,
+      artworkQuery.isError,
+      artworkQuery.isSuccess,
+      cachedArtworkUrl,
+      localArtworkUrl
+    ]
+  )
+  const artworkUrl = artworkSources.url
+  const artworkFallbackUrl = artworkSources.fallbackUrl
   const position = useInterpolatedPosition(data?.track)
 
   const command = useMutation({
@@ -514,7 +665,16 @@ function MusicExperience({ ctx, compact = false }) {
   const refresh = () => {
     command.mutate(
       { path: '/refresh', body: {} },
-      { onSuccess: () => void query.refetch() }
+      {
+        onSuccess: () => {
+          queryClient.removeQueries({
+            queryKey: artworkProfileQueryKey(ctx, profile),
+            predicate: candidate => candidate.queryKey.at(-1) !== artworkIdentity
+          })
+          void query.refetch()
+          void artworkQuery.refetch()
+        }
+      }
     )
   }
   const openPermissions = () => {
@@ -556,9 +716,12 @@ function MusicExperience({ ctx, compact = false }) {
     style: compact ? undefined : { maxWidth: '56rem' },
     children: [
       jsx(PlayerHeader, {
+        artworkUrl,
+        fallbackUrl: artworkFallbackUrl,
         compact,
         lyrics: data.lyrics,
         position,
+        refresh,
         runAction,
         runSeek,
         track: data.track,
@@ -585,12 +748,13 @@ function MusicExperience({ ctx, compact = false }) {
 function StatusChip({ ctx }) {
   const profile = useValue(host.state.profile)
   const query = useMusicState(ctx, profile)
+  const data = query.isError ? undefined : query.data
   const position = useInterpolatedPosition(
-    query.data?.track,
-    Boolean(query.data?.lyrics?.synced)
+    data?.track,
+    Boolean(data?.lyrics?.synced)
   )
-  const line = activeLineFor(query.data, position)
-  const text = line?.text?.trim() || query.data?.track?.title || 'Apple Music'
+  const line = activeLineFor(data, position)
+  const text = line?.text?.trim() || data?.track?.title || 'Apple Music'
   const label = text.length > 34 ? `${text.slice(0, 33)}…` : text
 
   return jsx('button', {

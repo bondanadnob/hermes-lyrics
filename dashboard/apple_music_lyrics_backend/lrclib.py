@@ -17,7 +17,7 @@ from .models import LyricLine, LyricsDocument, TrackInfo
 
 BASE_URL = "https://lrclib.net/api"
 CLIENT_HEADER = (
-    "HermesAppleMusicLyrics/0.1.0 "
+    "HermesAppleMusicLyrics/0.1.1 "
     "(https://github.com/bondanadnob/hermes-apple-music-lyrics)"
 )
 
@@ -87,15 +87,22 @@ def _candidate_score(candidate: dict, track: TrackInfo) -> float:
         return -1.0
 
     duration_score = 0.0
+    raw_duration = candidate.get("duration")
     try:
-        candidate_duration = float(candidate.get("duration") or 0)
+        if isinstance(raw_duration, bool) or not isinstance(
+            raw_duration, (int, float, str, type(None))
+        ):
+            return -1.0
+        candidate_duration = float(raw_duration or 0)
+        if not math.isfinite(candidate_duration) or candidate_duration < 0:
+            return -1.0
         if candidate_duration > 0 and track.duration > 0:
             delta = abs(candidate_duration - track.duration)
             if delta > 15:
                 return -1.0
             duration_score = max(0.0, 1.0 - delta / 15.0)
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError, OverflowError):
+        return -1.0
 
     return title_score * 55 + artist_score * 30 + album_score * 5 + duration_score * 20
 
@@ -111,7 +118,7 @@ def _is_strong_synced_candidate(candidate: dict, track: TrackInfo, score: float)
     if track.duration > 0:
         try:
             duration = float(candidate.get("duration") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return False
         if not math.isfinite(duration) or duration <= 0 or abs(duration - track.duration) > 3:
             return False
@@ -122,7 +129,10 @@ def _document_from_result(result: dict) -> LyricsDocument | None:
     synced = result.get("syncedLyrics")
     plain = str(result.get("plainLyrics") or "")
     if isinstance(synced, str) and synced.strip():
-        lines = parse_lrc(synced)
+        try:
+            lines = parse_lrc(synced)
+        except (ValueError, OverflowError):
+            return None
         if lines:
             enriched: list[LyricLine] = []
             for index, line in enumerate(lines):
@@ -135,17 +145,6 @@ def _document_from_result(result: dict) -> LyricsDocument | None:
                 synced=True,
                 word_timing="line",
             )
-    if plain:
-        return LyricsDocument(
-            lines=tuple(
-                LyricLine(float(index), text)
-                for index, text in enumerate(plain.splitlines())
-            ),
-            plain_text=plain,
-            source="LRCLIB",
-            synced=False,
-            word_timing="none",
-        )
     return None
 
 
@@ -156,6 +155,7 @@ class LRCLIBProvider:
     ) -> None:
         self._fetcher = fetcher or _fetch
         self._cache: dict[str, LyricsDocument] = {}
+        self._active_identity: str | None = None
         self._headers = {
             "Accept": "application/json",
             "User-Agent": CLIENT_HEADER,
@@ -164,26 +164,29 @@ class LRCLIBProvider:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+        self._active_identity = None
 
     def lyrics_for(self, track: TrackInfo) -> LyricsDocument | None:
         if not track.title or not track.artist:
             return None
-        if track.key in self._cache:
-            return self._cache[track.key]
+        if track.identity != self._active_identity:
+            self._cache.clear()
+            self._active_identity = track.identity
+        if track.identity in self._cache:
+            return self._cache[track.identity]
 
-        exact_document: LyricsDocument | None = None
-        exact_score = -1.0
         exact = self._exact(track)
         if exact is not None:
             exact_score = _candidate_score(exact, track)
-        if exact is not None and exact_score >= 0:
             exact_document = _document_from_result(exact)
-            if exact_document is not None and exact_document.synced:
-                self._cache[track.key] = exact_document
+            if (
+                exact_document is not None
+                and _is_strong_synced_candidate(exact, track, exact_score)
+            ):
+                self._cache[track.identity] = exact_document
                 return exact_document
 
         results = self._search(track)
-        candidates: list[tuple[float, LyricsDocument]] = []
         strong_synced: list[tuple[float, LyricsDocument]] = []
         for result in results:
             if not isinstance(result, dict):
@@ -193,21 +196,16 @@ class LRCLIBProvider:
                 continue
             document = _document_from_result(result)
             if document is not None:
-                candidates.append((score, document))
                 if document.synced and _is_strong_synced_candidate(result, track, score):
                     strong_synced.append((score, document))
 
         if strong_synced:
             document = max(strong_synced, key=lambda item: item[0])[1]
-        elif exact_document is not None:
-            document = exact_document
-        elif candidates:
-            document = max(candidates, key=lambda item: item[0])[1]
         else:
             document = None
 
         if document is not None:
-            self._cache[track.key] = document
+            self._cache[track.identity] = document
         return document
 
     def _exact(self, track: TrackInfo) -> dict | None:
@@ -229,7 +227,7 @@ class LRCLIBProvider:
         try:
             result = json.loads(response.body)
             return result if isinstance(result, dict) else None
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return None
 
     def _search(self, track: TrackInfo) -> list[dict]:
@@ -244,5 +242,5 @@ class LRCLIBProvider:
         try:
             result = json.loads(response.body)
             return result if isinstance(result, list) else []
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return []

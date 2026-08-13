@@ -84,6 +84,179 @@ class LRCLIBProviderTests(unittest.TestCase):
 
         self.assertEqual(document.lines[0].text, "right")
 
+    def test_huge_exact_duration_is_isolated_and_search_continues(self):
+        malformed_exact = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 10**400,
+            "syncedLyrics": "[00:01.00]malformed",
+        }
+        valid_search = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 201.4,
+            "syncedLyrics": "[00:01.00]valid",
+        }
+
+        def fetch(url, _headers, _timeout):
+            result = malformed_exact if "/api/get?" in url else [valid_search]
+            return HTTPResponse(200, json.dumps(result))
+
+        document = LRCLIBProvider(fetcher=fetch).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
+        )
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertEqual(document.lines[0].text, "valid")
+
+    def test_json_integer_digit_limit_in_exact_isolated_and_search_continues(self):
+        malformed_exact = (
+            '{"trackName":"Song","artistName":"Artist","albumName":"Album",'
+            '"duration":'
+            + "9" * 5000
+            + ',"syncedLyrics":"[00:01.00]malformed"}'
+        )
+        valid_search = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 201.4,
+            "syncedLyrics": "[00:01.00]valid",
+        }
+
+        def fetch(url, _headers, _timeout):
+            if "/api/get?" in url:
+                return HTTPResponse(200, malformed_exact)
+            return HTTPResponse(200, json.dumps([valid_search]))
+
+        document = LRCLIBProvider(fetcher=fetch).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
+        )
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertEqual(document.lines[0].text, "valid")
+
+    def test_deep_json_in_exact_isolated_and_search_continues(self):
+        malformed_exact = "[" * 2000 + "0" + "]" * 2000
+        valid_search = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 201.4,
+            "syncedLyrics": "[00:01.00]valid",
+        }
+        calls = []
+
+        def fetch(url, _headers, _timeout):
+            calls.append(url)
+            if "/api/get?" in url:
+                return HTTPResponse(200, malformed_exact)
+            return HTTPResponse(200, json.dumps([valid_search]))
+
+        document = LRCLIBProvider(fetcher=fetch).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
+        )
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertEqual(document.lines[0].text, "valid")
+        self.assertEqual(len(calls), 2)
+
+    def test_json_integer_digit_limit_in_search_returns_no_document(self):
+        malformed_search = '[{"duration":' + "9" * 5000 + "}]"
+        calls = []
+
+        def fetch(url, _headers, _timeout):
+            calls.append(url)
+            if "/api/get?" in url:
+                return HTTPResponse(404, "")
+            return HTTPResponse(200, malformed_search)
+
+        document = LRCLIBProvider(fetcher=fetch).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(len(calls), 2)
+
+    def test_deep_json_in_search_returns_no_document(self):
+        malformed_search = "[" * 2000 + "0" + "]" * 2000
+        calls = []
+
+        def fetch(url, _headers, _timeout):
+            calls.append(url)
+            if "/api/get?" in url:
+                return HTTPResponse(404, "")
+            return HTTPResponse(200, malformed_search)
+
+        document = LRCLIBProvider(fetcher=fetch).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(len(calls), 2)
+
+    def test_oversized_exact_timestamp_is_isolated_and_search_continues(self):
+        malformed_exact = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 201.5,
+            "syncedLyrics": f"[{'9' * 5000}:00.00]malformed",
+        }
+        valid_search = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 201.4,
+            "syncedLyrics": "[00:01.00]valid",
+        }
+
+        def fetch(url, _headers, _timeout):
+            result = malformed_exact if "/api/get?" in url else [valid_search]
+            return HTTPResponse(200, json.dumps(result))
+
+        document = LRCLIBProvider(fetcher=fetch).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
+        )
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertEqual(document.lines[0].text, "valid")
+
+    def test_oversized_search_timestamp_is_isolated_and_search_continues(self):
+        malformed_search = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 201.5,
+            "syncedLyrics": f"[{'9' * 401}:00.00]malformed",
+        }
+        valid_search = {
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 201.4,
+            "syncedLyrics": "[00:01.00]valid",
+        }
+
+        def fetch(url, _headers, _timeout):
+            if "/api/get?" in url:
+                return HTTPResponse(404, "")
+            return HTTPResponse(200, json.dumps([malformed_search, valid_search]))
+
+        document = LRCLIBProvider(fetcher=fetch).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
+        )
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertEqual(document.lines[0].text, "valid")
+
     def test_search_prefers_a_strong_synced_match_over_exact_plain_lyrics(self):
         exact_plain = {
             "trackName": "Song",
@@ -112,7 +285,7 @@ class LRCLIBProviderTests(unittest.TestCase):
         self.assertTrue(document.synced)
         self.assertEqual(document.lines[0].text, "synced")
 
-    def test_lower_confidence_synced_search_does_not_override_exact_plain_match(self):
+    def test_plain_exact_match_does_not_override_music_app_plain_fallback(self):
         exact_plain = {
             "trackName": "Song",
             "artistName": "Artist",
@@ -141,11 +314,9 @@ class LRCLIBProviderTests(unittest.TestCase):
             TrackInfo(True, "playing", "Song", "Artist", "Album", 180)
         )
 
-        self.assertIsNotNone(document)
-        self.assertFalse(document.synced)
-        self.assertEqual(document.plain_text, "Exact plain")
+        self.assertIsNone(document)
 
-    def test_plain_lyrics_are_a_safe_unsynced_fallback(self):
+    def test_plain_lrclib_lyrics_are_not_an_unsynchronized_fallback(self):
         provider = LRCLIBProvider(
             fetcher=lambda *_args: HTTPResponse(
                 200,
@@ -161,8 +332,38 @@ class LRCLIBProviderTests(unittest.TestCase):
 
         document = provider.lyrics_for(TrackInfo(True, "playing", "Song", "Artist"))
 
-        self.assertFalse(document.synced)
-        self.assertEqual([line.text for line in document.lines], ["first", "", "second"])
+        self.assertIsNone(document)
+
+    def test_weak_exact_response_is_rejected_and_search_is_attempted(self):
+        calls = []
+        responses = iter(
+            [
+                HTTPResponse(
+                    200,
+                    json.dumps(
+                        {
+                            "trackName": "Song Live",
+                            "artistName": "Artist Tribute",
+                            "albumName": "Album",
+                            "syncedLyrics": "[00:01.00]wrong version",
+                        }
+                    ),
+                ),
+                HTTPResponse(200, "[]"),
+            ]
+        )
+
+        def fetcher(url, headers, timeout):
+            del headers, timeout
+            calls.append(url)
+            return next(responses)
+
+        document = LRCLIBProvider(fetcher=fetcher).lyrics_for(
+            TrackInfo(True, "playing", "Song", "Artist", "Album", 200)
+        )
+
+        self.assertIsNone(document)
+        self.assertTrue(any("/search?" in url for url in calls))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 name: apple-music-lyrics
-version: 0.1.0
+version: 0.1.1
 description: Synchronized Apple Music lyrics for Hermes Desktop
 author: bondanadnob
 module: __init__.py
