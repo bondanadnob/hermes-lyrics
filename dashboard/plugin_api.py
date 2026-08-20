@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import platform
 import re
 import sys
@@ -13,6 +14,11 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Response
 
 if __package__:
+    from .apple_music_lyrics_backend.ambient import (
+        build_playback_router,
+        build_runtime_paths,
+        discover_ffmpeg_executable,
+    )
     from .apple_music_lyrics_backend.apple_cache import AppleMusicCacheProvider
     from .apple_music_lyrics_backend.errors import (
         ArtworkBusyError,
@@ -26,6 +32,11 @@ else:
     dashboard_dir = str(Path(__file__).resolve().parent)
     if dashboard_dir not in sys.path:
         sys.path.insert(0, dashboard_dir)
+    from apple_music_lyrics_backend.ambient import (
+        build_playback_router,
+        build_runtime_paths,
+        discover_ffmpeg_executable,
+    )
     from apple_music_lyrics_backend.apple_cache import AppleMusicCacheProvider
     from apple_music_lyrics_backend.errors import (
         ArtworkBusyError,
@@ -36,16 +47,38 @@ else:
     from apple_music_lyrics_backend.music import MusicClient
     from apple_music_lyrics_backend.service import LyricsService
 
+try:
+    from hermes_constants import get_hermes_home
+except ImportError:
+
+    def get_hermes_home() -> Path:
+        configured = (os.environ.get("HERMES_HOME") or "").strip()
+        return Path(configured).expanduser() if configured else Path.home() / ".hermes"
+
 
 VERSION = "0.1.1"
 router = APIRouter()
 _NO_STORE = {"Cache-Control": "private, no-store"}
 _apple_cache = AppleMusicCacheProvider()
+_ffmpeg_path = discover_ffmpeg_executable()
+_ambient_paths = build_runtime_paths(
+    plugin_root=Path(__file__).resolve().parent.parent,
+    hermes_home=get_hermes_home(),
+    ffmpeg_executable=_ffmpeg_path,
+)
+_playback = build_playback_router(MusicClient(), _ambient_paths)
 _service = LyricsService(
-    music=MusicClient(),
+    music=_playback,
     providers=(_apple_cache, LRCLIBProvider()),
     artwork_provider=_apple_cache,
 )
+
+
+def _shutdown_plugin() -> None:
+    _playback.shutdown()
+
+
+router.on_shutdown.append(_shutdown_plugin)
 _artwork_admission = threading.Lock()
 _deferred_artwork_tasks: set[asyncio.Task] = set()
 
@@ -195,11 +228,74 @@ async def post_permissions():
     return {"ok": True}
 
 
+@router.post("/source")
+async def post_source(body: dict):
+    source = body.get("source")
+    if not isinstance(source, str) or source not in {"music_app", "ambient"}:
+        raise HTTPException(
+            status_code=400,
+            detail="source must be music_app or ambient",
+        )
+    try:
+        await asyncio.to_thread(_service.select_source, source)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="unable to switch source safely",
+            headers={**_NO_STORE, "Retry-After": "1"},
+        ) from exc
+    return {"ok": True}
+
+
+@router.post("/ambient/listen")
+async def post_ambient_listen():
+    try:
+        await asyncio.to_thread(_service.listen_ambient)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="recognition could not start",
+            headers={**_NO_STORE, "Retry-After": "1"},
+        ) from exc
+    return {"ok": True}
+
+
+@router.post("/ambient/stop")
+async def post_ambient_stop():
+    try:
+        await asyncio.to_thread(_service.stop_ambient)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="recognition is still stopping",
+            headers={**_NO_STORE, "Retry-After": "1"},
+        ) from exc
+    return {"ok": True}
+
+
 @router.get("/health")
 async def get_health():
+    ambient_available = (
+        platform.system() == "Darwin"
+        and _ambient_paths.python_executable.is_file()
+        and os.access(_ambient_paths.python_executable, os.X_OK)
+        and _ambient_paths.worker_script.is_file()
+        and _ambient_paths.ffmpeg_executable.is_file()
+        and os.access(_ambient_paths.ffmpeg_executable, os.X_OK)
+    )
     return {
         "ok": True,
         "version": VERSION,
         "platform": platform.system(),
         "musicAppSupported": platform.system() == "Darwin",
+        "ambientRecognition": {
+            "available": ambient_available,
+            "experimental": True,
+            "provider": "ShazamIO",
+            "networkPayload": "audio_fingerprint_and_protocol_metadata",
+            "lyricsLookup": "track_metadata_to_lrclib",
+            "sampleSeconds": 8,
+        },
     }

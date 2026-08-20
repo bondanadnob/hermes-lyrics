@@ -63,6 +63,10 @@ class TrackInfo:
     error: str | None = None
     persistent_id: str = ""
     database_id: str = ""
+    source: str = "music_app"
+    can_control: bool = True
+    can_seek: bool = True
+    artwork_url: str | None = None
 
     @property
     def key(self) -> str:
