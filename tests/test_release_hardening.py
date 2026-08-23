@@ -45,15 +45,15 @@ class ReleaseHardeningContractTests(unittest.TestCase):
         for action in ("actions/checkout", "actions/setup-python", "actions/setup-node"):
             self.assertNotRegex(workflow, rf"{action}@v\d")
         self.assertIn(
-            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
             workflow,
         )
         self.assertIn(
-            "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5",
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0",
             workflow,
         )
         self.assertIn(
-            "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4",
+            "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0",
             workflow,
         )
         self.assertIn('python-version: "3.11.9"', workflow)
