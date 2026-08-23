@@ -17,7 +17,7 @@ from .models import LyricLine, LyricsDocument, TrackInfo
 
 BASE_URL = "https://lrclib.net/api"
 CLIENT_HEADER = (
-    "HermesAppleMusicLyrics/0.1.1 "
+    "HermesAppleMusicLyrics/0.2.0 "
     "(https://github.com/bondanadnob/hermes-apple-music-lyrics)"
 )
 

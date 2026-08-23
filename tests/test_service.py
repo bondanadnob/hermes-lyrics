@@ -176,6 +176,30 @@ class LyricsServiceTests(unittest.TestCase):
             "https://is1-ssl.mzstatic.com/320x320.jpg",
         )
 
+    def test_ambient_match_artwork_precedes_the_music_metadata_provider(self):
+        remote = ArtworkURLProvider("https://is1-ssl.mzstatic.com/fallback.jpg")
+        track = TrackInfo(
+            running=True,
+            state="playing",
+            title="Song",
+            artist="Artist",
+            source="ambient",
+            can_control=False,
+            can_seek=False,
+            artwork_url="https://is2-ssl.mzstatic.com/shazam.jpg",
+        )
+        state = LyricsService(
+            music=FakeMusic(track),
+            providers=(Provider(),),
+            artwork_provider=remote,
+        ).state()
+
+        self.assertEqual(
+            state["artwork"]["remote_url"],
+            "https://is2-ssl.mzstatic.com/shazam.jpg",
+        )
+        self.assertEqual(remote.calls, 0)
+
     def test_lrclib_lyrics_do_not_erase_independent_music_artwork(self):
         track = TrackInfo(True, "playing", "Song", "Artist", "Album", 201.5)
         artwork = ArtworkPayload(
@@ -412,6 +436,111 @@ class LyricsServiceTests(unittest.TestCase):
             release.set()
             artwork_thread.join(2)
             state_thread.join(2)
+
+    def test_reports_ambient_idle_without_treating_it_as_music_app_idle(self):
+        provider = Provider()
+        state = LyricsService(
+            music=FakeMusic(
+                TrackInfo(
+                    running=False,
+                    state="ambient_idle",
+                    source="ambient",
+                    can_control=False,
+                    can_seek=False,
+                )
+            ),
+            providers=(provider,),
+        ).state()
+
+        self.assertEqual(state["status"], "ambient_idle")
+        self.assertEqual(state["track"]["source"], "ambient")
+        self.assertEqual(provider.calls, 0)
+
+    def test_reports_active_ambient_listening_without_provider_calls(self):
+        provider = Provider()
+        state = LyricsService(
+            music=FakeMusic(
+                TrackInfo(
+                    running=True,
+                    state="listening",
+                    source="ambient",
+                    can_control=False,
+                    can_seek=False,
+                )
+            ),
+            providers=(provider,),
+        ).state()
+
+        self.assertEqual(state["status"], "listening")
+        self.assertEqual(provider.calls, 0)
+
+    def test_reports_ambient_no_match_without_provider_calls(self):
+        provider = Provider()
+        state = LyricsService(
+            music=FakeMusic(
+                TrackInfo(
+                    running=False,
+                    state="no_match",
+                    source="ambient",
+                    can_control=False,
+                    can_seek=False,
+                )
+            ),
+            providers=(provider,),
+        ).state()
+
+        self.assertEqual(state["status"], "no_match")
+        self.assertEqual(provider.calls, 0)
+
+    def test_reports_ambient_recognition_error_without_provider_calls(self):
+        provider = Provider()
+        state = LyricsService(
+            music=FakeMusic(
+                TrackInfo(
+                    running=False,
+                    state="recognition_error",
+                    source="ambient",
+                    can_control=False,
+                    can_seek=False,
+                    error="ambient_recognition",
+                )
+            ),
+            providers=(provider,),
+        ).state()
+
+        self.assertEqual(state["status"], "recognition_error")
+        self.assertEqual(state["track"]["error"], "ambient_recognition")
+        self.assertEqual(provider.calls, 0)
+
+    def test_ambient_lifecycle_delegates_to_the_playback_router(self):
+        calls = []
+
+        class RoutedMusic(FakeMusic):
+            def select_source(self, source):
+                calls.append(("source", source))
+
+            def listen_ambient(self):
+                calls.append(("listen", None))
+
+            def stop_ambient(self):
+                calls.append(("stop", None))
+
+        service = LyricsService(
+            music=RoutedMusic(TrackInfo(False, "not_running")),
+            providers=(),
+        )
+        for method_name in ("select_source", "listen_ambient", "stop_ambient"):
+            if not callable(getattr(service, method_name, None)):
+                self.fail(f"LyricsService.{method_name} is required")
+
+        service.select_source("ambient")
+        service.listen_ambient()
+        service.stop_ambient()
+
+        self.assertEqual(
+            calls,
+            [("source", "ambient"), ("listen", None), ("stop", None)],
+        )
 
     def test_reports_idle_and_permission_states_without_provider_calls(self):
         provider = Provider()

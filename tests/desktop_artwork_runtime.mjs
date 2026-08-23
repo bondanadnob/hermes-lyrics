@@ -17,6 +17,7 @@ const sandbox = {
   ROUTES_AREA: 'routes',
   SIDEBAR_NAV_AREA: 'sidebar',
   STATUSBAR_AREAS: { right: 'status-right' },
+  SegmentedControl: props => ({ type: 'SegmentedControl', props }),
   cn: (...values) => values.filter(Boolean).join(' '),
   haptic: () => {},
   host: {
@@ -297,31 +298,84 @@ assert.doesNotMatch(JSON.stringify(staleArtworkTree), /data:image\/jpeg|mzstatic
 
 sandbox.useMemo = factory => factory()
 sandbox.useValue = () => 'default'
-sandbox.useQuery = options =>
-  options.queryKey.at(-1) === 'state'
-    ? { data: staleState, isLoading: false, isError: true, refetch: async () => {} }
-    : {
-        data: { identity, data_url: local },
-        isSuccess: true,
-        isError: false,
-        refetch: async () => {}
-      }
+const listeningState = {
+  status: 'listening',
+  track: {
+    running: true,
+    state: 'listening',
+    title: '',
+    artist: '',
+    album: '',
+    duration: 0,
+    position: 0,
+    sampled_at: Date.now() / 1000,
+    identity: '',
+    source: 'ambient',
+    can_control: false,
+    can_seek: false
+  },
+  lyrics: { source: '', synced: false, lines: [] },
+  artwork: { remote_url: null }
+}
+let staleArtworkEnabled = null
+sandbox.useQuery = options => {
+  if (options.queryKey.at(-1) === 'state') {
+    return { data: listeningState, isLoading: false, isError: true, refetch: async () => {} }
+  }
+  staleArtworkEnabled = options.enabled
+  return {
+    data: undefined,
+    isSuccess: false,
+    isError: false,
+    refetch: async () => {}
+  }
+}
 sandbox.useQueryClient = () => ({ invalidateQueries: () => {}, removeQueries: () => {} })
 sandbox.useMutation = () => ({ mutate: () => {}, isPending: false })
 sandbox.jsx = (type, props) =>
   typeof type === 'function' ? type(props || {}) : { type, props: props || {} }
 sandbox.jsxs = sandbox.jsx
-const failedStateTree = MusicExperience({
+const retainedListeningTree = MusicExperience({
   ctx: { source: 'local', rest: async () => ({}) },
   compact: false
 })
-const failedStateText = JSON.stringify(failedStateTree)
-assert.match(failedStateText, /Lyrics backend unavailable/)
-assert.doesNotMatch(failedStateText, /stale title|stale lyric|mzstatic/)
-const failedStatusText = JSON.stringify(StatusChip({
+const retainedListeningText = JSON.stringify(retainedListeningTree)
+assert.match(retainedListeningText, /Microphone status unknown/)
+assert.match(retainedListeningText, /Stop listening/)
+assert.doesNotMatch(retainedListeningText, /Microphone active/)
+assert.doesNotMatch(retainedListeningText, /Lyrics backend unavailable/)
+assert.equal(staleArtworkEnabled, false)
+const retainedStatusText = JSON.stringify(StatusChip({
   ctx: { source: 'local', rest: async () => ({}) }
 }))
-assert.match(failedStatusText, /Apple Music/)
-assert.doesNotMatch(failedStatusText, /stale title|stale lyric/)
+assert.match(retainedStatusText, /Microphone status unknown/)
+assert.doesNotMatch(retainedStatusText, /Microphone active/)
+
+staleArtworkEnabled = null
+sandbox.useQuery = options => {
+  if (options.queryKey.at(-1) === 'state') {
+    return { data: staleState, isLoading: false, isError: true, refetch: async () => {} }
+  }
+  staleArtworkEnabled = options.enabled
+  return {
+    data: undefined,
+    isSuccess: false,
+    isError: false,
+    refetch: async () => {}
+  }
+}
+const retainedReadyTree = MusicExperience({
+  ctx: { source: 'local', rest: async () => ({}) },
+  compact: false
+})
+const retainedReadyText = JSON.stringify(retainedReadyTree)
+assert.match(retainedReadyText, /Music status unknown/)
+assert.doesNotMatch(retainedReadyText, /stale title|stale lyric/)
+assert.equal(staleArtworkEnabled, false)
+const retainedReadyStatusText = JSON.stringify(StatusChip({
+  ctx: { source: 'local', rest: async () => ({}) }
+}))
+assert.match(retainedReadyStatusText, /Music status unknown/)
+assert.doesNotMatch(retainedReadyStatusText, /stale title|stale lyric/)
 
 console.log(JSON.stringify({ passed: true }))

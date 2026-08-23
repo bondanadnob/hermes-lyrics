@@ -4,6 +4,7 @@ import {
   ROUTES_AREA,
   SIDEBAR_NAV_AREA,
   STATUSBAR_AREAS,
+  SegmentedControl,
   cn,
   haptic,
   host,
@@ -153,6 +154,18 @@ function ActionButton({ label, children, disabled, onClick }) {
   })
 }
 
+function SourceSwitcher({ disabled, onChange, source }) {
+  return jsx(SegmentedControl, {
+    disabled,
+    onChange,
+    options: [
+      { id: 'music_app', label: 'Music.app' },
+      { id: 'ambient', label: 'Nearby' }
+    ],
+    value: source === 'ambient' ? 'ambient' : 'music_app'
+  })
+}
+
 function safeArtworkUrl(value) {
   if (typeof value !== 'string' || !value) return null
   if (value.length <= 2700000 && LOCAL_ARTWORK_PATTERN.test(value)) {
@@ -262,20 +275,22 @@ function SourcePill({ lyrics }) {
   })
 }
 
-function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, position, refresh, runAction, runSeek, track, working }) {
+function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, onSourceChange, position, refresh, runAction, runSeek, source, track, working }) {
   const percentage = track.duration
     ? clamp((position / track.duration) * 100, 0, 100)
     : 0
   const subtitle = [track.artist, track.album].filter(Boolean).join(' · ')
+  const canControl = track.can_control !== false
+  const canSeek = track.can_seek !== false
 
   const seekFromEvent = event => {
-    if (!track.duration || working) return
+    if (!canSeek || !track.duration || working) return
     const rectangle = event.currentTarget.getBoundingClientRect()
     const ratio = clamp((event.clientX - rectangle.left) / rectangle.width, 0, 1)
     runSeek(ratio * track.duration)
   }
   const seekFromKeyboard = event => {
-    if (!track.duration || working) return
+    if (!canSeek || !track.duration || working) return
     const steps = {
       ArrowLeft: position - 5,
       ArrowDown: position - 5,
@@ -292,6 +307,14 @@ function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, position, refr
   return jsxs('div', {
     className: 'shrink-0 border-b border-(--ui-stroke-secondary) p-3',
     children: [
+      jsx('div', {
+        className: 'mb-3 flex justify-center',
+        children: jsx(SourceSwitcher, {
+          disabled: working,
+          onChange: onSourceChange,
+          source
+        })
+      }),
       jsxs('div', {
         className: 'flex min-w-0 items-center gap-3',
         children: [
@@ -323,24 +346,27 @@ function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, position, refr
       jsxs('div', {
         className: 'mt-3 flex items-center justify-center gap-1',
         children: [
-          jsx(ActionButton, {
-            label: 'Previous track',
-            disabled: working,
-            onClick: () => runAction('previous'),
-            children: '◀◀'
-          }),
-          jsx(ActionButton, {
-            label: track.state === 'playing' ? 'Pause' : 'Play',
-            disabled: working,
-            onClick: () => runAction('play_pause'),
-            children: track.state === 'playing' ? '❚❚' : '▶'
-          }),
-          jsx(ActionButton, {
-            label: 'Next track',
-            disabled: working,
-            onClick: () => runAction('next'),
-            children: '▶▶'
-          }),
+          canControl &&
+            jsx(ActionButton, {
+              label: 'Previous track',
+              disabled: working,
+              onClick: () => runAction('previous'),
+              children: '◀◀'
+            }),
+          canControl &&
+            jsx(ActionButton, {
+              label: track.state === 'playing' ? 'Pause' : 'Play',
+              disabled: working,
+              onClick: () => runAction('play_pause'),
+              children: track.state === 'playing' ? '❚❚' : '▶'
+            }),
+          canControl &&
+            jsx(ActionButton, {
+              label: 'Next track',
+              disabled: working,
+              onClick: () => runAction('next'),
+              children: '▶▶'
+            }),
           jsx(ActionButton, {
             label: 'Refresh lyrics and artwork',
             disabled: working,
@@ -349,29 +375,31 @@ function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, position, refr
           })
         ]
       }),
-      jsx('div', {
-        role: 'slider',
-        tabIndex: track.duration && !working ? 0 : -1,
-        'aria-label': 'Seek in current track',
-        'aria-disabled': !track.duration || working,
+      track.duration > 0 &&
+        jsx('div', {
+          role: canSeek ? 'slider' : 'progressbar',
+        tabIndex: canSeek && track.duration && !working ? 0 : -1,
+        'aria-label': canSeek ? 'Seek in current track' : 'Estimated nearby playback position',
+        'aria-disabled': !canSeek || !track.duration || working,
         'aria-valuemin': 0,
         'aria-valuemax': Math.round(Number(track.duration) || 0),
         'aria-valuenow': Math.round(position),
         'aria-valuetext': `${formatTime(position)} of ${formatTime(track.duration)}`,
-        onClick: seekFromEvent,
-        onKeyDown: seekFromKeyboard,
+        onClick: canSeek ? seekFromEvent : undefined,
+        onKeyDown: canSeek ? seekFromKeyboard : undefined,
         className: cn(
           'mt-2 block h-2 w-full rounded-full bg-(--ui-stroke-secondary)',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
-          working ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+          !canSeek || working ? 'cursor-default opacity-60' : 'cursor-pointer'
         ),
         children: jsx('span', {
           className: 'block h-full rounded-full bg-(--ui-accent) transition-[width] duration-100',
           style: { width: `${percentage}%` }
         })
       }),
-      jsxs('div', {
-        className: 'mt-1 flex justify-between text-[0.65rem] text-(--ui-text-quaternary)',
+      track.duration > 0 &&
+        jsxs('div', {
+          className: 'mt-1 flex justify-between text-[0.65rem] text-(--ui-text-quaternary)',
         children: [
           jsx('span', { children: formatTime(position) }),
           jsx('span', { children: formatTime(track.duration) })
@@ -425,7 +453,7 @@ function ActiveLyric({ line, lines, index, position }) {
   })
 }
 
-function LyricsScroller({ compact, lyrics, position, seek, working }) {
+function LyricsScroller({ canSeek, compact, lyrics, position, seek, working }) {
   const lines = Array.isArray(lyrics?.lines) ? lyrics.lines : []
   const currentIndex = lyrics?.synced ? findCurrentIndex(lines, position) : -1
   const activeRef = useRef(null)
@@ -476,9 +504,9 @@ function LyricsScroller({ compact, lyrics, position, seek, working }) {
             {
               ref: current ? activeRef : undefined,
               type: 'button',
-              disabled: !lyrics.synced || working,
+              disabled: !canSeek || !lyrics.synced || working,
               onClick: () => {
-                if (lyrics.synced && !working) {
+                if (canSeek && lyrics.synced && !working) {
                   haptic('tap')
                   seek(Number(line.time) || 0)
                   setFollow(true)
@@ -493,7 +521,7 @@ function LyricsScroller({ compact, lyrics, position, seek, working }) {
                   : compact
                     ? 'text-sm text-(--ui-text-secondary)'
                     : 'text-lg text-(--ui-text-secondary)',
-                lyrics.synced && !working ? 'cursor-pointer' : 'cursor-default'
+                canSeek && lyrics.synced && !working ? 'cursor-pointer' : 'cursor-default'
               ),
               style: { opacity },
               children: current
@@ -523,18 +551,114 @@ function LyricsScroller({ compact, lyrics, position, seek, working }) {
 const MemoizedLyricsScroller = memo(
   LyricsScroller,
   (previous, next) =>
+    previous.canSeek === next.canSeek &&
     previous.compact === next.compact &&
     previous.lyrics === next.lyrics &&
     previous.position === next.position &&
     previous.working === next.working
 )
 
-function StateNotice({ status, refresh, openPermissions, working }) {
+function StateNotice({ listen, onSourceChange, status, stop, refresh, openPermissions, source, working }) {
   const common = 'flex h-full flex-col items-center justify-center gap-3 p-6 text-center'
+  const sourceSwitcher = jsx(SourceSwitcher, {
+    disabled: working,
+    onChange: onSourceChange,
+    source
+  })
+  if (status === 'listening') {
+    return jsxs('div', {
+      className: common,
+      children: [
+        sourceSwitcher,
+        jsx('div', {
+          className: 'animate-pulse text-2xl text-(--ui-accent)',
+          children: '●'
+        }),
+        jsx('div', { className: 'font-medium', children: 'Microphone active' }),
+        jsx('button', {
+          type: 'button',
+          disabled: working,
+          onClick: stop,
+          className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm hover:bg-(--chrome-action-hover)',
+          children: 'Stop listening'
+        })
+      ]
+    })
+  }
+  if (status === 'listening_unknown') {
+    return jsxs('div', {
+      className: common,
+      children: [
+        sourceSwitcher,
+        jsx('div', {
+          className: 'text-2xl text-(--ui-text-tertiary)',
+          children: '◌'
+        }),
+        jsx('div', { className: 'font-medium', children: 'Microphone status unknown' }),
+        jsx('p', {
+          className: 'max-w-sm text-sm text-(--ui-text-tertiary)',
+          children: 'Hermes could not refresh the listening state. Stop remains available until the backend confirms capture ended.'
+        }),
+        jsx('button', {
+          type: 'button',
+          disabled: working,
+          onClick: stop,
+          className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm hover:bg-(--chrome-action-hover)',
+          children: 'Stop listening'
+        })
+      ]
+    })
+  }
+  if (status === 'state_unknown') {
+    return jsxs('div', {
+      className: common,
+      children: [
+        sourceSwitcher,
+        jsx('div', { className: 'text-2xl text-(--ui-text-tertiary)', children: '◌' }),
+        jsx('div', { className: 'font-medium', children: 'Music status unknown' }),
+        jsx('p', {
+          className: 'max-w-sm text-sm text-(--ui-text-tertiary)',
+          children: 'Hermes could not refresh the current backend state. Cached track and lyric details are hidden until polling recovers.'
+        })
+      ]
+    })
+  }
+  if (['ambient_idle', 'no_match', 'recognition_error'].includes(status)) {
+    const heading =
+      status === 'no_match'
+        ? 'No nearby song recognized'
+        : status === 'recognition_error'
+          ? 'Recognition unavailable'
+          : 'Identify nearby music'
+    return jsxs('div', {
+      className: common,
+      children: [
+        sourceSwitcher,
+        jsx('div', { className: 'text-3xl text-(--ui-text-quaternary)', children: '◉' }),
+        jsx('div', { className: 'font-medium', children: heading }),
+        jsx('p', {
+          className: 'max-w-sm text-sm text-(--ui-text-tertiary)',
+          children: "Experimental · Unofficial Shazam fingerprint service. An 8-second sample is fingerprinted on this Mac; the fingerprint, request metadata and your IP address reach Shazam. If a song matches, track metadata is sent to LRCLIB for lyrics. Showing recognized artwork contacts Apple's mzstatic.com CDN, which receives the image request and your IP address. Audio is not saved."
+        }),
+        jsx('button', {
+          type: 'button',
+          disabled: working,
+          onClick: listen,
+          className: cn(
+            'rounded-md bg-(--ui-accent) px-3 py-1.5 text-sm',
+            'disabled:pointer-events-none disabled:opacity-40'
+          ),
+          style: { color: 'var(--ui-bg-primary)' },
+          children: 'Listen for 8 seconds'
+        })
+      ]
+    })
+  }
   if (status === 'permission_required') {
     return jsxs('div', {
       className: common,
       children: [
+        sourceSwitcher,
         jsx('div', { className: 'text-2xl', children: '♫' }),
         jsx('div', { className: 'font-medium', children: 'Allow Music access' }),
         jsx('p', {
@@ -559,6 +683,7 @@ function StateNotice({ status, refresh, openPermissions, working }) {
     return jsxs('div', {
       className: common,
       children: [
+        sourceSwitcher,
         jsx('div', { className: 'text-3xl text-(--ui-text-quaternary)', children: '♪' }),
         jsx('div', { className: 'font-medium', children: 'Play something in Apple Music' }),
         jsx('p', {
@@ -572,17 +697,21 @@ function StateNotice({ status, refresh, openPermissions, working }) {
     return jsxs('div', {
       className: common,
       children: [
+        sourceSwitcher,
         jsx('div', { className: 'font-medium', children: 'No lyrics found' }),
         jsx('p', {
           className: 'max-w-sm text-sm text-(--ui-text-tertiary)',
-          children: 'Try opening Lyrics once in Music.app so its local cache can populate, then refresh.'
+          children:
+            source === 'ambient'
+              ? 'Song identified, but no synchronized lyrics were found. Try listening again.'
+              : 'Try opening Lyrics once in Music.app so its local cache can populate, then refresh.'
         }),
         jsx('button', {
           type: 'button',
           disabled: working,
-          onClick: refresh,
+          onClick: source === 'ambient' ? listen : refresh,
           className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm hover:bg-(--chrome-action-hover)',
-          children: 'Refresh lyrics'
+          children: source === 'ambient' ? 'Listen again' : 'Refresh lyrics'
         })
       ]
     })
@@ -590,6 +719,7 @@ function StateNotice({ status, refresh, openPermissions, working }) {
   return jsxs('div', {
     className: common,
     children: [
+      sourceSwitcher,
       jsx('div', { className: 'font-medium', children: 'Lyrics backend unavailable' }),
       jsx('p', {
         className: 'text-sm text-(--ui-text-tertiary)',
@@ -603,7 +733,9 @@ function MusicExperience({ ctx, compact = false }) {
   const profile = useValue(host.state.profile)
   const query = useMusicState(ctx, profile)
   const queryClient = useQueryClient()
-  const data = query.isError ? undefined : query.data
+  const retainedData = query.data
+  const data = query.isError ? undefined : retainedData
+  const ambientArtwork = data?.track?.source === 'ambient'
   const cachedArtworkUrl = useMemo(
     () => safeArtworkUrl(data?.artwork?.remote_url),
     [data?.artwork?.remote_url]
@@ -613,15 +745,17 @@ function MusicExperience({ ctx, compact = false }) {
     ctx,
     profile,
     artworkIdentity,
-    Boolean(data?.track?.title)
+    Boolean(data?.track?.title && data?.track?.source !== 'ambient')
   )
   const localArtworkUrl = useMemo(
     () => safeArtworkUrl(artworkQuery.data?.data_url),
     [artworkQuery.data?.data_url]
   )
   const artworkSources = useMemo(
-    () => selectArtworkSources(artworkQuery, cachedArtworkUrl, localArtworkUrl),
+    () =>
+      ambientArtwork ? { url: cachedArtworkUrl, fallbackUrl: null } : selectArtworkSources(artworkQuery, cachedArtworkUrl, localArtworkUrl),
     [
+      ambientArtwork,
       artworkQuery.data?.data_url,
       artworkQuery.error,
       artworkQuery.isError,
@@ -633,6 +767,9 @@ function MusicExperience({ ctx, compact = false }) {
   const artworkUrl = artworkSources.url
   const artworkFallbackUrl = artworkSources.fallbackUrl
   const position = useInterpolatedPosition(data?.track)
+  const selectedSource = data?.track?.source === 'ambient' ? 'ambient' : 'music_app'
+  const lastKnownSource =
+    retainedData?.track?.source === 'ambient' ? 'ambient' : 'music_app'
 
   const command = useMutation({
     mutationFn: async input => {
@@ -681,6 +818,18 @@ function MusicExperience({ ctx, compact = false }) {
     haptic('tap')
     command.mutate({ path: '/permissions', body: {} })
   }
+  const selectSource = nextSource => {
+    haptic('tap')
+    command.mutate({ path: '/source', body: { source: nextSource } })
+  }
+  const listenAmbient = () => {
+    haptic('tap')
+    command.mutate({ path: '/ambient/listen', body: {} })
+  }
+  const stopAmbient = () => {
+    haptic('tap')
+    command.mutate({ path: '/ambient/stop', body: {} })
+  }
 
   if (query.isLoading) {
     return jsxs('div', {
@@ -691,19 +840,42 @@ function MusicExperience({ ctx, compact = false }) {
       ]
     })
   }
-  if (query.isError && !data) {
+  if (query.isError) {
     return jsx(StateNotice, {
-      status: 'error',
+      stop: stopAmbient,
+      onSourceChange: selectSource,
+      status:
+        retainedData?.status === 'listening'
+          ? 'listening_unknown'
+          : retainedData
+            ? 'state_unknown'
+            : 'error',
       refresh,
       openPermissions,
+      source: lastKnownSource,
       working: command.isPending
     })
   }
-  if (!data || ['idle', 'permission_required', 'error'].includes(data.status)) {
+  if (
+    !data ||
+    [
+      'idle',
+      'permission_required',
+      'error',
+      'ambient_idle',
+      'listening',
+      'no_match',
+      'recognition_error'
+    ].includes(data.status)
+  ) {
     return jsx(StateNotice, {
+      listen: listenAmbient,
+      onSourceChange: selectSource,
       status: data?.status || 'error',
+      stop: stopAmbient,
       refresh,
       openPermissions,
+      source: selectedSource,
       working: command.isPending
     })
   }
@@ -720,21 +892,27 @@ function MusicExperience({ ctx, compact = false }) {
         fallbackUrl: artworkFallbackUrl,
         compact,
         lyrics: data.lyrics,
+        onSourceChange: selectSource,
         position,
         refresh,
         runAction,
         runSeek,
+        source: selectedSource,
         track: data.track,
         working: command.isPending
       }),
       data.status === 'not_found'
         ? jsx(StateNotice, {
+            listen: listenAmbient,
+            onSourceChange: selectSource,
             status: 'not_found',
             refresh,
             openPermissions,
+            source: selectedSource,
             working: command.isPending
           })
         : jsx(MemoizedLyricsScroller, {
+            canSeek: data.track.can_seek !== false,
             compact,
             lyrics: data.lyrics,
             position: data.lyrics?.synced ? position : 0,
@@ -748,13 +926,21 @@ function MusicExperience({ ctx, compact = false }) {
 function StatusChip({ ctx }) {
   const profile = useValue(host.state.profile)
   const query = useMusicState(ctx, profile)
-  const data = query.isError ? undefined : query.data
+  const retainedData = query.data
+  const data = query.isError ? undefined : retainedData
   const position = useInterpolatedPosition(
     data?.track,
     Boolean(data?.lyrics?.synced)
   )
   const line = activeLineFor(data, position)
-  const text = line?.text?.trim() || data?.track?.title || 'Apple Music'
+  const text =
+    query.isError
+      ? retainedData?.status === 'listening'
+        ? 'Microphone status unknown'
+        : 'Music status unknown'
+      : data?.status === 'listening'
+        ? 'Microphone active'
+        : line?.text?.trim() || data?.track?.title || 'Apple Music'
   const label = text.length > 34 ? `${text.slice(0, 33)}…` : text
 
   return jsx('button', {
@@ -776,7 +962,7 @@ function StatusChip({ ctx }) {
 export default {
   id: ID,
   name: 'Apple Music Lyrics',
-  description: 'Synchronized lyrics for the track playing in Music.app',
+  description: 'Synchronized lyrics for Music.app and manually recognized Nearby music',
   register(ctx) {
     ctx.registerMany([
       {

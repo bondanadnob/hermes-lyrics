@@ -95,10 +95,26 @@ class LyricsService:
                 self._select_track(None)
                 self._set_latest_identity(None)
                 return {**base, "status": "permission_required"}
+            if track.source == "ambient" and track.state == "recognition_error":
+                self._select_track(None)
+                self._set_latest_identity(None)
+                return {**base, "status": "recognition_error"}
             if track.error:
                 self._select_track(None)
                 self._set_latest_identity(None)
                 return {**base, "status": "error"}
+            if track.source == "ambient" and track.state == "ambient_idle":
+                self._select_track(None)
+                self._set_latest_identity(None)
+                return {**base, "status": "ambient_idle"}
+            if track.source == "ambient" and track.state == "listening":
+                self._select_track(None)
+                self._set_latest_identity(None)
+                return {**base, "status": "listening"}
+            if track.source == "ambient" and track.state == "no_match":
+                self._select_track(None)
+                self._set_latest_identity(None)
+                return {**base, "status": "no_match"}
             if not track.running or track.state in {"not_running", "stopped"} or not track.title:
                 self._select_track(None)
                 self._set_latest_identity(None)
@@ -148,6 +164,24 @@ class LyricsService:
 
     def open_automation_settings(self) -> None:
         self.music.open_automation_settings()
+
+    def select_source(self, source: str) -> None:
+        with self._lock:
+            getattr(self.music, "select_source")(source)
+            self._select_track(None)
+            self._set_latest_identity(None)
+
+    def listen_ambient(self) -> None:
+        with self._lock:
+            getattr(self.music, "listen_ambient")()
+            self._select_track(None)
+            self._set_latest_identity(None)
+
+    def stop_ambient(self) -> None:
+        with self._lock:
+            getattr(self.music, "stop_ambient")()
+            self._select_track(None)
+            self._set_latest_identity(None)
 
     def refresh(self) -> None:
         if not self._lock.acquire(blocking=False):
@@ -200,6 +234,9 @@ class LyricsService:
         return None
 
     def _remote_artwork_for(self, track: TrackInfo) -> str | None:
+        recognized_artwork = _safe_remote_artwork_url(track.artwork_url)
+        if recognized_artwork is not None:
+            return recognized_artwork
         if self.artwork_provider is None:
             return None
         try:

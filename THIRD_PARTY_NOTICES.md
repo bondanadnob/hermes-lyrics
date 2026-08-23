@@ -1,8 +1,22 @@
 # Related open-source work
 
 This project was independently implemented for Hermes Desktop. No third-party
-source code is bundled. The architecture and compatibility research benefited
-from these open-source projects:
+source code is bundled in this repository. The installer creates an isolated
+runtime and downloads the pinned dependency listed below. The architecture and
+compatibility research also benefited from these open-source projects:
+
+- [shazamio/ShazamIO](https://github.com/shazamio/ShazamIO) `0.8.1`
+  (MIT): installed into the profile-scoped recognition environment and used to
+  generate Shazam signatures locally and query an unofficial Shazam-compatible
+  endpoint. It is not an official Apple/Shazam API and carries no availability,
+  price, or service-level guarantee.
+- [`shazamio-core==1.1.2`](https://pypi.org/project/shazamio-core/1.1.2/)
+  (MIT): the transitive compiled fingerprint engine downloaded by the isolated,
+  hash-locked installer. The PyPI metadata license field is blank, but the exact
+  1.1.2 wheel and source distribution both include an MIT license with
+  `Copyright © 2024 dotX12`. This artifact evidence is the basis for the license
+  classification; the wheel is downloaded at install time and is not bundled in
+  this repository.
 
 - [janestreetshiller/hermes-spotify-player](https://github.com/janestreetshiller/hermes-spotify-player)
   (MIT): the closest Hermes Desktop precedent, targeting Spotify with a scoped
