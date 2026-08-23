@@ -1183,6 +1183,7 @@ time.sleep(30)
     def test_worker_main_writes_compact_json_for_one_ephemeral_capture(self):
         captured = []
         output = io.StringIO()
+        trusted_ffmpeg = Path("/trusted/test/ffmpeg")
         main = getattr(ambient_worker, "main", None)
         if not callable(main):
             self.fail("ambient_worker.main is required")
@@ -1195,17 +1196,22 @@ time.sleep(30)
             self.assertEqual(audio, b"ogg")
             return {"matches": [], "track": {}}
 
-        exit_code = main(
-            ["--ffmpeg", "/opt/homebrew/bin/ffmpeg", "--duration", "8.0"],
-            capture=capture,
-            recognize=recognize,
-            output=output,
-        )
+        with patch.object(
+            ambient_worker,
+            "_trusted_ffmpeg_executable",
+            return_value=trusted_ffmpeg,
+        ):
+            exit_code = main(
+                ["--ffmpeg", str(trusted_ffmpeg), "--duration", "8.0"],
+                capture=capture,
+                recognize=recognize,
+                output=output,
+            )
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(
             captured,
-            [(Path("/opt/homebrew/bin/ffmpeg").resolve(strict=True), 8.0)],
+            [(trusted_ffmpeg, 8.0)],
         )
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["matches"], [])
@@ -1215,6 +1221,7 @@ time.sleep(30)
 
     def test_worker_main_reports_the_capture_start_time(self):
         output = io.StringIO()
+        trusted_ffmpeg = Path("/trusted/test/ffmpeg")
 
         def capture(_ffmpeg, _duration):
             return b"RIFF"
@@ -1223,12 +1230,17 @@ time.sleep(30)
             return {"matches": [], "track": {}}
 
         before = time.time()
-        ambient_worker.main(
-            ["--ffmpeg", "/opt/homebrew/bin/ffmpeg", "--duration", "8.0"],
-            capture=capture,
-            recognize=recognize,
-            output=output,
-        )
+        with patch.object(
+            ambient_worker,
+            "_trusted_ffmpeg_executable",
+            return_value=trusted_ffmpeg,
+        ):
+            ambient_worker.main(
+                ["--ffmpeg", str(trusted_ffmpeg), "--duration", "8.0"],
+                capture=capture,
+                recognize=recognize,
+                output=output,
+            )
         after = time.time()
         payload = json.loads(output.getvalue())
 
