@@ -56,7 +56,7 @@ except ImportError:
         return Path(configured).expanduser() if configured else Path.home() / ".hermes"
 
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 router = APIRouter()
 _NO_STORE = {"Cache-Control": "private, no-store"}
 _apple_cache = AppleMusicCacheProvider()

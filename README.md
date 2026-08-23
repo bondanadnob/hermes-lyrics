@@ -110,12 +110,12 @@ The backend and parser suite uses synthetic lyrics only:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m ensurepip --upgrade
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/ruff check .
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-ci.lock
+.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
 .venv/bin/python -m unittest discover -s tests -v
-node --check desktop/plugin.js
-node --check dashboard/dist/index.js
-node tests/desktop_artwork_runtime.mjs
+.venv/bin/ruff check .
+npm ci --ignore-scripts
+npm test
 ```
 
 To exercise the real Music.app and providers without printing lyric text:

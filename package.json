@@ -1,0 +1,18 @@
+{
+  "name": "hermes-apple-music-lyrics-tests",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Self-contained desktop runtime test harness for Hermes Apple Music Lyrics",
+  "scripts": {
+    "test:syntax": "node --check desktop/plugin.js && node --check dashboard/dist/index.js && node --check tests/desktop_artwork_runtime.mjs && node --check tests/desktop_plugin_loader.mjs && node --check tests/desktop_plugin_sdk_shim.mjs && node --check tests/desktop_state_failure_runtime.mjs && node --check tests/register_desktop_plugin_loader.mjs",
+    "test:artwork": "node tests/desktop_artwork_runtime.mjs",
+    "test:state": "HERMES_REPO_ROOT=. PLUGIN_PATH=desktop/plugin.js SDK_SHIM_PATH=tests/desktop_plugin_sdk_shim.mjs node --import ./tests/register_desktop_plugin_loader.mjs tests/desktop_state_failure_runtime.mjs",
+    "test": "npm run test:syntax && npm run test:artwork && npm run test:state"
+  },
+  "devDependencies": {
+    "@tanstack/react-query": "5.101.2",
+    "jsdom": "29.1.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  }
+}

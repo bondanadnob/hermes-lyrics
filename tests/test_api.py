@@ -598,7 +598,7 @@ class PluginAPITests(unittest.TestCase):
 
         self.assertEqual(
             {manifest_version, project_version, plugin_version, plugin_api.VERSION},
-            {"0.1.1"},
+            {"0.2.0"},
         )
         self.assertTrue(
             CLIENT_HEADER.startswith(f"HermesAppleMusicLyrics/{manifest_version} ")
