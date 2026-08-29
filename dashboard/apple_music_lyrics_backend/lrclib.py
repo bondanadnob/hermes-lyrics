@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -17,8 +18,8 @@ from .models import LyricLine, LyricsDocument, TrackInfo
 
 BASE_URL = "https://lrclib.net/api"
 CLIENT_HEADER = (
-    "HermesAppleMusicLyrics/0.2.0 "
-    "(https://github.com/bondanadnob/hermes-apple-music-lyrics)"
+    "LyricsForHermes/0.3.0 "
+    "(https://github.com/bondanadnob/hermes-lyrics)"
 )
 
 
@@ -26,6 +27,7 @@ CLIENT_HEADER = (
 class HTTPResponse:
     status: int
     body: str
+    headers: dict[str, str] | None = None
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -57,9 +59,11 @@ def _fetch(url: str, headers: dict[str, str], timeout: float) -> HTTPResponse:
             body = response.read(2_000_001)
             if len(body) > 2_000_000:
                 return HTTPResponse(413, "")
-            return HTTPResponse(response.status, body.decode("utf-8", errors="replace"))
+            return HTTPResponse(
+                response.status, body.decode("utf-8", errors="replace"), dict(response.headers.items())
+            )
     except HTTPError as exc:
-        return HTTPResponse(exc.code, "")
+        return HTTPResponse(exc.code, "", dict(exc.headers.items()) if exc.headers else None)
     except (URLError, TimeoutError, OSError):
         return HTTPResponse(0, "")
 
@@ -152,8 +156,11 @@ class LRCLIBProvider:
     def __init__(
         self,
         fetcher: Callable[[str, dict[str, str], float], HTTPResponse] | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._fetcher = fetcher or _fetch
+        self._clock = monotonic_clock
+        self._cooldown_until = 0.0
         self._cache: dict[str, LyricsDocument] = {}
         self._active_identity: str | None = None
         self._headers = {
@@ -174,8 +181,12 @@ class LRCLIBProvider:
             self._active_identity = track.identity
         if track.identity in self._cache:
             return self._cache[track.identity]
+        if self._clock() < self._cooldown_until:
+            return None
 
         exact = self._exact(track)
+        if self._clock() < self._cooldown_until:
+            return None
         if exact is not None:
             exact_score = _candidate_score(exact, track)
             exact_document = _document_from_result(exact)
@@ -222,6 +233,7 @@ class LRCLIBProvider:
             self._headers,
             5.0,
         )
+        self._apply_rate_limit(response)
         if response.status != 200:
             return None
         try:
@@ -237,6 +249,7 @@ class LRCLIBProvider:
             self._headers,
             5.0,
         )
+        self._apply_rate_limit(response)
         if response.status != 200:
             return []
         try:
@@ -244,3 +257,29 @@ class LRCLIBProvider:
             return result if isinstance(result, list) else []
         except (ValueError, RecursionError):
             return []
+
+
+    def _apply_rate_limit(self, response: HTTPResponse) -> None:
+        """Set a bounded monotonic cooldown without blocking callers."""
+        if response.status != 429:
+            return
+        raw = next(
+            (
+                value
+                for name, value in (response.headers or {}).items()
+                if name.casefold() == "retry-after"
+            ),
+            "",
+        )
+        if (
+            isinstance(raw, str)
+            and len(raw) <= 3
+            and raw.isascii()
+            and raw.isdecimal()
+        ):
+            delay = int(raw)
+            if delay >= 1:
+                delay = min(delay, 300)
+                self._cooldown_until = max(self._cooldown_until, self._clock() + delay)
+                return
+        self._cooldown_until = max(self._cooldown_until, self._clock() + 30)

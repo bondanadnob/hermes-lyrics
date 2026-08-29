@@ -1,974 +1,621 @@
 import importlib.util
-import io
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-INSTALLER = Path(__file__).resolve().parents[1] / "scripts" / "install.py"
-RECOGNITION_LOCK = Path(__file__).resolve().parents[1] / "requirements-recognition.lock"
-SPEC = importlib.util.spec_from_file_location("apple_music_lyrics_installer", INSTALLER)
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("lyrics_for_hermes_installer", ROOT / "scripts" / "install.py")
+assert SPEC is not None and SPEC.loader is not None
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
 
 
+def write_marker(path: Path, value: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "marker.txt").write_text(value, encoding="utf-8")
+
+
 class InstallerTests(unittest.TestCase):
-    def test_readme_documents_the_unified_plugin_install(self):
-        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
-            encoding="utf-8"
-        )
+    def test_readme_documents_transactional_unified_install_and_legacy_key(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertNotIn("--desktop-only", readme)
-        self.assertIn("plugins/apple-music-lyrics/desktop/plugin.js", readme)
-        self.assertIn("two-target", readme)
+        self.assertIn("plugins/lyrics-for-hermes", readme)
+        self.assertIn("canonical plugin ID is `lyrics-for-hermes`", readme)
+        self.assertIn("legacy `apple-music-lyrics` key", readme)
+        for location in ("`plugins`", "`desktop-plugins`", "`plugin-data`"):
+            self.assertIn(location, readme)
+        self.assertIn("same filesystem transaction", readme)
+        self.assertIn("failed swap restores", readme)
 
-    def test_notices_record_the_shazamio_core_artifact_license(self):
-        notices = (
-            Path(__file__).resolve().parents[1] / "THIRD_PARTY_NOTICES.md"
-        ).read_text(encoding="utf-8")
+    def test_installer_has_no_removed_runtime_or_dependency_lock(self):
+        source = (ROOT / "scripts" / "install.py").read_text(encoding="utf-8").casefold()
 
-        self.assertIn("`shazamio-core==1.1.2`", notices)
-        self.assertIn("wheel and source distribution both include an MIT license", notices)
-        self.assertIn("Copyright © 2024 dotX12", notices)
-        self.assertIn("PyPI metadata license field is blank", notices)
-
-    def test_recognition_lock_exactly_pins_and_hashes_every_package(self):
-        text = RECOGNITION_LOCK.read_text(encoding="utf-8")
-        blocks = []
-        current = []
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if not raw_line[:1].isspace() and not line.startswith("--hash="):
-                if current:
-                    blocks.append(current)
-                current = [line]
-            else:
-                current.append(line.rstrip("\\").strip())
-        if current:
-            blocks.append(current)
-
-        self.assertGreaterEqual(len(blocks), 10)
-        names = set()
-        for block in blocks:
-            requirement = block[0].rstrip("\\").strip()
-            self.assertRegex(requirement, r"^[A-Za-z0-9_.-]+==[^\s;]+(?:\s*;.*)?$")
-            self.assertNotIn("@", requirement)
-            self.assertTrue(
-                any(line.startswith("--hash=sha256:") for line in block[1:]),
-                requirement,
-            )
-            names.add(requirement.split("==", 1)[0].lower().replace("_", "-"))
-
-        self.assertIn("shazamio", names)
-        self.assertIn("shazamio-core", names)
-        self.assertIn("pip", names)
-        self.assertIn("setuptools", names)
+        for forbidden in ("recognition", "shazam", "ffmpeg", "requirements-recognition"):
+            self.assertNotIn(forbidden, source)
+        self.assertFalse((ROOT / "requirements-recognition.in").exists())
+        self.assertFalse((ROOT / "requirements-recognition.lock").exists())
 
     def test_empty_hermes_home_defaults_to_the_user_home(self):
-        with patch.dict(os.environ, {"HERMES_HOME": ""}):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
             with (
-                patch.object(installer.Path, "home", return_value=Path("/safe-home")),
+                patch.dict(os.environ, {"HERMES_HOME": ""}),
                 patch.object(installer.shutil, "which", return_value=None),
+                patch.object(installer.Path, "home", return_value=home),
             ):
-                self.assertEqual(
-                    installer.resolve_hermes_home(),
-                    Path("/safe-home/.hermes"),
-                )
+                resolved = installer.resolve_hermes_home()
+        self.assertEqual(resolved, (home / ".hermes").resolve())
 
-    def test_unset_hermes_home_can_resolve_the_active_cli_profile(self):
-        class Result:
-            returncode = 0
-            stdout = "/Users/example/.hermes/profiles/work/config.yaml\n"
+    def test_unset_hermes_home_resolves_the_active_cli_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp) / "profiles" / "work"
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(installer.shutil, "which", return_value="/usr/local/bin/hermes"),
+                patch.object(installer, "_profile_home_from_cli", return_value=profile.resolve()),
+            ):
+                resolved = installer.resolve_hermes_home()
+        self.assertEqual(resolved, profile.resolve())
 
-        with (
-            patch.dict(os.environ, {"HERMES_HOME": ""}),
-            patch.object(installer.shutil, "which", return_value="/usr/local/bin/hermes"),
-            patch.object(installer.subprocess, "run", return_value=Result()),
-        ):
-            home = installer.resolve_hermes_home()
-
-        self.assertEqual(home, Path("/Users/example/.hermes/profiles/work"))
+    def test_explicit_hermes_home_is_canonicalized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            configured = Path(temp) / "profile" / ".." / "profile"
+            with patch.dict(os.environ, {"HERMES_HOME": str(configured)}):
+                resolved = installer.resolve_hermes_home()
+        self.assertEqual(resolved, configured.resolve())
 
     def test_rejects_target_inside_source_before_copying(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "checkout"
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
             source.mkdir()
-            target = source / ".hermes" / "plugins" / "apple-music-lyrics"
-            with patch.object(installer.shutil, "copytree") as copytree:
-                with self.assertRaises(RuntimeError):
-                    installer.install_target(source, target, link=False, force=False)
-            copytree.assert_not_called()
+            target = source / "profile" / "plugins" / installer.PLUGIN_ID
+            with self.assertRaisesRegex(RuntimeError, "overlap"):
+                installer.install_target(source, target, link=False, force=True)
+            self.assertFalse(target.exists())
 
     def test_rejects_source_inside_target_before_force_removal(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "plugin-target"
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "target"
             source = target / "checkout"
             source.mkdir(parents=True)
-            with patch.object(installer, "remove_target") as remove_target:
-                with self.assertRaises(RuntimeError):
-                    installer.install_target(source, target, link=False, force=True)
-            remove_target.assert_not_called()
-
-    def test_force_never_deletes_the_source_when_already_in_target(self):
-        with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / "plugin"
-            source.mkdir()
-            sentinel = source / "keep.txt"
-            sentinel.write_text("safe", encoding="utf-8")
-
+            marker = source / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "overlap"):
-                installer.install_target(source, source, link=False, force=True)
+                installer.install_target(source, target, link=False, force=True)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
 
-            self.assertEqual(sentinel.read_text(encoding="utf-8"), "safe")
-
-    def test_failed_forced_copy_preserves_the_existing_installation(self):
+    def test_failed_forced_copy_preserves_existing_installation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "source"
             target = root / "target"
-            source.mkdir()
-            target.mkdir()
-            (source / "new.txt").write_text("new", encoding="utf-8")
-            sentinel = target / "healthy.txt"
-            sentinel.write_text("healthy", encoding="utf-8")
-
-            with patch.object(
-                installer.shutil,
-                "copytree",
-                side_effect=OSError("injected copy failure"),
-            ):
-                with self.assertRaises(OSError):
+            write_marker(source, "new")
+            write_marker(target, "old")
+            with patch.object(installer.shutil, "copytree", side_effect=OSError("copy failed")):
+                with self.assertRaisesRegex(OSError, "copy failed"):
                     installer.install_target(source, target, link=False, force=True)
+            self.assertEqual((target / "marker.txt").read_text(encoding="utf-8"), "old")
 
-            self.assertEqual(sentinel.read_text(encoding="utf-8"), "healthy")
-
-    def test_missing_link_source_preserves_the_existing_installation(self):
+    def test_copy_install_excludes_development_artifacts_but_keeps_dashboard_dist(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            source = root / "missing-source"
+            source = root / "source"
             target = root / "target"
-            target.mkdir()
-            sentinel = target / "healthy.txt"
-            sentinel.write_text("healthy", encoding="utf-8")
+            write_marker(source, "payload")
+            for name in (".git", ".venv", ".ruff_cache", "build", "node_modules", "sample.egg-info"):
+                write_marker(source / name, name)
+            write_marker(source / "dashboard" / "dist", "desktop bundle")
 
-            with self.assertRaisesRegex(RuntimeError, "source directory"):
-                installer.install_target(source, target, link=True, force=True)
+            installer.install_target(source, target, link=False, force=False)
 
-            self.assertEqual(sentinel.read_text(encoding="utf-8"), "healthy")
+            for name in (".git", ".venv", ".ruff_cache", "build", "node_modules", "sample.egg-info"):
+                self.assertFalse((target / name).exists(), name)
+            self.assertEqual((target / "dashboard" / "dist" / "marker.txt").read_text(), "desktop bundle")
 
-    def test_pair_staging_failure_preserves_both_existing_installations(self):
+    def test_pair_staging_failure_preserves_both_existing_targets(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            backend_source = root / "backend-source"
-            desktop_source = root / "desktop-source"
-            backend_target = root / "backend-target"
-            desktop_target = root / "desktop-target"
-            for path in (backend_source, desktop_source, backend_target, desktop_target):
-                path.mkdir()
-            (backend_source / "new.txt").write_text("new backend", encoding="utf-8")
-            (desktop_source / "new.txt").write_text("new desktop", encoding="utf-8")
-            (backend_target / "old.txt").write_text("old backend", encoding="utf-8")
-            (desktop_target / "old.txt").write_text("old desktop", encoding="utf-8")
+            first_source, second_source = root / "source-a", root / "source-b"
+            first_target, second_target = root / "target-a", root / "target-b"
+            for path, value in (
+                (first_source, "new-a"),
+                (second_source, "new-b"),
+                (first_target, "old-a"),
+                (second_target, "old-b"),
+            ):
+                write_marker(path, value)
             real_copytree = installer.shutil.copytree
 
-            def fail_desktop_copy(source, *args, **kwargs):
-                if Path(source) == desktop_source:
-                    raise OSError("injected desktop staging failure")
+            def fail_second(source, *args, **kwargs):
+                if Path(source) == second_source:
+                    raise OSError("second staging failed")
                 return real_copytree(source, *args, **kwargs)
 
-            with patch.object(installer.shutil, "copytree", side_effect=fail_desktop_copy):
-                with self.assertRaises(OSError):
-                    installer.install_targets(
-                        [
-                            (backend_source, backend_target),
-                            (desktop_source, desktop_target),
-                        ],
+            with patch.object(installer.shutil, "copytree", side_effect=fail_second):
+                with self.assertRaisesRegex(OSError, "second staging failed"):
+                    installer.install_bundle(
+                        [(first_source, first_target), (second_source, second_target)],
                         link=False,
                         force=True,
                     )
+            self.assertEqual((first_target / "marker.txt").read_text(), "old-a")
+            self.assertEqual((second_target / "marker.txt").read_text(), "old-b")
 
-            self.assertEqual((backend_target / "old.txt").read_text(), "old backend")
-            self.assertEqual((desktop_target / "old.txt").read_text(), "old desktop")
-            self.assertFalse((backend_target / "new.txt").exists())
-
-    def test_pair_commit_failure_rolls_back_both_installations(self):
+    def test_pair_commit_failure_rolls_back_both_targets(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            backend_source = root / "backend-source"
-            desktop_source = root / "desktop-source"
-            backend_target = root / "backend-target"
-            desktop_target = root / "desktop-target"
-            for path in (backend_source, desktop_source, backend_target, desktop_target):
-                path.mkdir()
-            (backend_source / "new.txt").write_text("new backend", encoding="utf-8")
-            (desktop_source / "new.txt").write_text("new desktop", encoding="utf-8")
-            (backend_target / "old.txt").write_text("old backend", encoding="utf-8")
-            (desktop_target / "old.txt").write_text("old desktop", encoding="utf-8")
+            first_source, second_source = root / "source-a", root / "source-b"
+            first_target, second_target = root / "target-a", root / "target-b"
+            for path, value in (
+                (first_source, "new-a"),
+                (second_source, "new-b"),
+                (first_target, "old-a"),
+                (second_target, "old-b"),
+            ):
+                write_marker(path, value)
             real_rename = installer.Path.rename
 
-            def fail_desktop_commit(path, destination):
-                if path.name == "payload" and Path(destination) == desktop_target:
-                    raise OSError("injected desktop commit failure")
+            def fail_second_commit(path, destination):
+                if path.name == "payload" and Path(destination) == second_target:
+                    raise OSError("second commit failed")
                 return real_rename(path, destination)
 
-            with patch.object(installer.Path, "rename", fail_desktop_commit):
-                with self.assertRaises(OSError):
-                    installer.install_targets(
-                        [
-                            (backend_source, backend_target),
-                            (desktop_source, desktop_target),
-                        ],
+            with patch.object(installer.Path, "rename", fail_second_commit):
+                with self.assertRaisesRegex(OSError, "second commit failed"):
+                    installer.install_bundle(
+                        [(first_source, first_target), (second_source, second_target)],
                         link=False,
                         force=True,
                     )
+            self.assertEqual((first_target / "marker.txt").read_text(), "old-a")
+            self.assertEqual((second_target / "marker.txt").read_text(), "old-b")
 
-            self.assertEqual((backend_target / "old.txt").read_text(), "old backend")
-            self.assertEqual((desktop_target / "old.txt").read_text(), "old desktop")
-            self.assertFalse((backend_target / "new.txt").exists())
-            self.assertFalse((desktop_target / "new.txt").exists())
-
-    def test_recognition_runtime_rejects_a_missing_lock_before_running_commands(self):
-        calls = []
-
-        class Result:
-            returncode = 0
-
-        def runner(command, **options):
-            calls.append((command, options))
-            if command[1:3] == ["-m", "venv"]:
-                staged = Path(command[-1])
-                (staged / "bin").mkdir(parents=True)
-                (staged / "bin" / "python").write_text("python", encoding="utf-8")
-            return Result()
-
+    def test_legacy_target_overlap_is_rejected_before_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
-            missing_lock = Path(temp) / "missing.lock"
-            with patch.object(installer, "RECOGNITION_LOCK", missing_lock):
-                with self.assertRaisesRegex(RuntimeError, "dependency lock"):
-                    installer.install_recognition_runtime(
-                        Path(temp) / "recognition-venv",
-                        python_executable=Path("/usr/local/bin/python3.11"),
-                        runner=runner,
-                    )
+            source = Path(temp) / "source"
+            target = Path(temp) / "target"
+            write_marker(source, "source")
+            with self.assertRaisesRegex(RuntimeError, "legacy target overlaps"):
+                installer.install_bundle(
+                    [(source, target)],
+                    link=False,
+                    force=False,
+                    obsolete_targets=[target / "nested"],
+                )
+            self.assertFalse(target.exists())
 
-        self.assertEqual(calls, [])
-
-    def test_bundle_rejects_a_missing_lock_before_staging_plugin_files(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            backend_source = root / "backend-source"
-            desktop_source = root / "desktop-source"
-            backend_source.mkdir()
-            desktop_source.mkdir()
-            missing_lock = root / "missing.lock"
-            real_copytree = installer.shutil.copytree
-            with (
-                patch.object(installer, "RECOGNITION_LOCK", missing_lock),
-                patch.object(
-                    installer.shutil,
-                    "copytree",
-                    wraps=real_copytree,
-                ) as copytree,
-            ):
-                with self.assertRaisesRegex(RuntimeError, "dependency lock"):
-                    installer.install_bundle(
-                        [
-                            (backend_source, root / "backend-target"),
-                            (desktop_source, root / "desktop-target"),
-                        ],
-                        root / "recognition-target",
-                        link=False,
-                        force=False,
-                    )
-
-            copytree.assert_not_called()
-
-    def test_bundle_rejects_a_recognition_target_overlapping_the_source(self):
+    def test_success_quarantines_all_three_legacy_profile_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "source"
-            source.mkdir()
-            plugin_target = root / "plugins" / "apple-music-lyrics"
-            recognition_target = source / "recognition-venv"
+            profile = root / "profile"
+            target = profile / "plugins" / installer.PLUGIN_ID
+            legacy = [
+                profile / "plugins" / installer.LEGACY_PLUGIN_ID,
+                profile / "desktop-plugins" / installer.LEGACY_PLUGIN_ID,
+                profile / "plugin-data" / installer.LEGACY_PLUGIN_ID,
+            ]
+            write_marker(source, "new")
+            for index, path in enumerate(legacy):
+                write_marker(path, f"legacy-{index}")
 
-            real_copytree = installer.shutil.copytree
-
-            def install_runtime(target, **_options):
-                (target / "bin").mkdir(parents=True)
-                (target / "bin" / "python").write_text("python", encoding="utf-8")
-
-            with (
-                patch.object(
-                    installer.shutil,
-                    "copytree",
-                    wraps=real_copytree,
-                ) as copytree,
-                patch.object(
-                    installer,
-                    "install_recognition_runtime",
-                    side_effect=install_runtime,
-                ),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "recognition runtime.*overlap"):
-                    installer.install_bundle(
-                        [(source, plugin_target)],
-                        recognition_target,
-                        link=False,
-                        force=False,
-                    )
-
-            copytree.assert_not_called()
-            self.assertFalse(recognition_target.exists())
-
-    def test_recognition_runtime_installs_a_pinned_package_without_a_shell(self):
-        runtime_installer = getattr(installer, "install_recognition_runtime", None)
-        if not callable(runtime_installer):
-            self.fail("install_recognition_runtime is required")
-
-        calls = []
-
-        class Completed:
-            returncode = 0
-
-        def runner(command, **kwargs):
-            calls.append((command, kwargs))
-            if command[1:3] == ["-m", "venv"]:
-                staged = Path(command[-1])
-                (staged / "bin").mkdir(parents=True)
-                (staged / "bin" / "python").write_text("", encoding="utf-8")
-            return Completed()
-
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp) / "plugin-data" / "recognition-venv"
-            runtime_installer(
-                target,
-                python_executable=Path("/usr/local/bin/python3.11"),
-                runner=runner,
+            installer.install_bundle(
+                [(source, target)],
+                link=False,
+                force=False,
+                obsolete_targets=legacy,
             )
 
-            self.assertTrue((target / "bin" / "python").is_file())
+            self.assertEqual((target / "marker.txt").read_text(), "new")
+            self.assertTrue(all(not path.exists() for path in legacy))
 
-        self.assertEqual(calls[0][0][1:3], ["-m", "venv"])
-        self.assertTrue(
-            any(str(RECOGNITION_LOCK) in command for command, _ in calls)
-        )
-        self.assertFalse(any(kwargs.get("shell", False) for _, kwargs in calls))
-
-    def test_recognition_runtime_installs_only_from_the_hash_lock(self):
-        calls = []
-
-        class Result:
-            returncode = 0
-
-        def runner(command, **options):
-            calls.append((command, options))
-            if command[1:3] == ["-m", "venv"]:
-                runtime = Path(command[-1])
-                python = runtime / "bin" / "python"
-                python.parent.mkdir(parents=True, exist_ok=True)
-                python.write_text("python", encoding="utf-8")
-            return Result()
-
-        with tempfile.TemporaryDirectory() as temp:
-            installer.install_recognition_runtime(
-                Path(temp) / "recognition-venv",
-                python_executable=Path("/usr/local/bin/python3.11"),
-                runner=runner,
-            )
-
-        pip_calls = [
-            command
-            for command, _options in calls
-            if command[1:6] == ["-I", "-m", "pip", "--isolated", "install"]
-        ]
-        self.assertEqual(len(pip_calls), 1)
-        command = pip_calls[0]
-        self.assertEqual(command[4:6], ["--isolated", "install"])
-        self.assertIn("--require-hashes", command)
-        self.assertIn("--only-binary=:all:", command)
-        self.assertIn("--no-cache-dir", command)
-        self.assertEqual(
-            command[command.index("--index-url") + 1],
-            "https://pypi.org/simple",
-        )
-        self.assertEqual(command[command.index("-r") + 1], str(RECOGNITION_LOCK))
-        self.assertFalse(any(value.startswith("shazamio==") for value in command))
-
-    def test_recognition_runtime_pip_ignores_parent_python_paths(self):
-        calls = []
-
-        class Result:
-            returncode = 0
-
-        def runner(command, **options):
-            calls.append((command, options))
-            if command[1:3] == ["-m", "venv"]:
-                runtime = Path(command[-1])
-                python = runtime / "bin" / "python"
-                python.parent.mkdir(parents=True, exist_ok=True)
-                python.write_text("python", encoding="utf-8")
-            return Result()
-
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp) / "recognition-venv"
-            installer.install_recognition_runtime(
-                target,
-                python_executable=Path("/usr/local/bin/python3.11"),
-                runner=runner,
-            )
-
-        self.assertEqual(calls[1][0][1:4], ["-I", "-m", "pip"])
-
-    def test_recognition_runtime_subprocesses_receive_a_minimal_environment(self):
-        calls = []
-
-        class Result:
-            returncode = 0
-
-        def runner(command, **options):
-            calls.append((command, options))
-            if command[1:3] == ["-m", "venv"]:
-                runtime = Path(command[-1])
-                python = runtime / "bin" / "python"
-                python.parent.mkdir(parents=True, exist_ok=True)
-                python.write_text("python", encoding="utf-8")
-            return Result()
-
-        poisoned = {
-            "PYTHONPATH": "/poison/python",
-            "PYTHONHOME": "/poison/home",
-            "PIP_INDEX_URL": "https://poison.invalid/simple",
-            "PIP_CONFIG_FILE": "/poison/pip.conf",
-            "HTTPS_PROXY": "http://poison.invalid",
-            "VIRTUAL_ENV": "/poison/venv",
-        }
-        with tempfile.TemporaryDirectory() as temp, patch.dict(
-            os.environ, poisoned, clear=False
-        ):
-            installer.install_recognition_runtime(
-                Path(temp) / "recognition-venv",
-                python_executable=Path("/usr/local/bin/python3.11"),
-                runner=runner,
-            )
-
-        allowed = {
-            "HOME",
-            "LANG",
-            "LC_ALL",
-            "PATH",
-            "PYTHONNOUSERSITE",
-            "TMPDIR",
-        }
-        for _command, options in calls:
-            self.assertIn("env", options)
-            environment = options["env"]
-            self.assertLessEqual(set(environment), allowed)
-            self.assertTrue(set(poisoned).isdisjoint(environment))
-            self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
-
-    def test_recognition_runtime_verifies_distribution_without_import_side_effects(self):
-        calls = []
-
-        class Result:
-            returncode = 0
-
-        def runner(command, **options):
-            calls.append((command, options))
-            if command[1:3] == ["-m", "venv"]:
-                runtime = Path(command[-1])
-                python = runtime / "bin" / "python"
-                python.parent.mkdir(parents=True, exist_ok=True)
-                python.write_text("python", encoding="utf-8")
-            return Result()
-
-        with tempfile.TemporaryDirectory() as temp:
-            installer.install_recognition_runtime(
-                Path(temp) / "recognition-venv",
-                python_executable=Path("/usr/local/bin/python3.11"),
-                runner=runner,
-            )
-
-        verification = next(command for command, _options in calls if "-c" in command)
-        code = verification[verification.index("-c") + 1]
-        self.assertNotIn("import shazamio;", code)
-        self.assertIn("metadata.version", code)
-        self.assertIn("find_spec", code)
-
-    def test_recognition_runtime_verifies_the_pinned_core_distribution(self):
-        calls = []
-
-        class Result:
-            returncode = 0
-
-        def runner(command, **_options):
-            calls.append(command)
-            if command[1:3] == ["-m", "venv"]:
-                runtime = Path(command[-1])
-                python = runtime / "bin" / "python"
-                python.parent.mkdir(parents=True, exist_ok=True)
-                python.write_text("python", encoding="utf-8")
-            return Result()
-
-        with tempfile.TemporaryDirectory() as temp:
-            installer.install_recognition_runtime(
-                Path(temp) / "recognition-venv",
-                python_executable=Path("/usr/local/bin/python3.11"),
-                runner=runner,
-            )
-
-        verification = next(command for command in calls if "-c" in command)
-        code = verification[verification.index("-c") + 1]
-        self.assertIn("metadata.version('shazamio-core') == '1.1.2'", code)
-        self.assertIn("find_spec('shazamio_core')", code)
-
-    def test_recognition_runtime_runs_pip_check_before_commit(self):
-        calls = []
-
-        class Result:
-            returncode = 0
-
-        def runner(command, **_options):
-            calls.append(command)
-            if command[1:3] == ["-m", "venv"]:
-                runtime = Path(command[-1])
-                python = runtime / "bin" / "python"
-                python.parent.mkdir(parents=True, exist_ok=True)
-                python.write_text("python", encoding="utf-8")
-            return Result()
-
-        with tempfile.TemporaryDirectory() as temp:
-            installer.install_recognition_runtime(
-                Path(temp) / "recognition-venv",
-                python_executable=Path("/usr/local/bin/python3.11"),
-                runner=runner,
-            )
-
-        self.assertTrue(
-            any(command[1:] == ["-I", "-m", "pip", "check"] for command in calls)
-        )
-
-    def test_recognition_runtime_swap_failure_restores_the_previous_runtime(self):
-        class Completed:
-            returncode = 0
-
-        def runner(command, **kwargs):
-            if command[1:3] == ["-m", "venv"]:
-                staged = Path(command[-1])
-                (staged / "bin").mkdir(parents=True)
-                (staged / "bin" / "python").write_text("", encoding="utf-8")
-            return Completed()
-
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp) / "plugin-data" / "recognition-venv"
-            target.mkdir(parents=True)
-            sentinel = target / "healthy.txt"
-            sentinel.write_text("healthy", encoding="utf-8")
-            real_rename = installer.Path.rename
-
-            def fail_new_runtime_commit(path, destination):
-                if path.name == "venv" and Path(destination) == target:
-                    raise OSError("injected runtime commit failure")
-                return real_rename(path, destination)
-
-            with patch.object(installer.Path, "rename", fail_new_runtime_commit):
-                with self.assertRaises(OSError):
-                    installer.install_recognition_runtime(
-                        target,
-                        python_executable=Path("/usr/local/bin/python3.11"),
-                        runner=runner,
-                    )
-
-            self.assertTrue(sentinel.is_file())
-            self.assertEqual(sentinel.read_text(encoding="utf-8"), "healthy")
-
-    def test_bundle_runtime_commit_failure_restores_all_three_targets(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            backend_source = root / "backend-source"
-            desktop_source = root / "desktop-source"
-            backend_target = root / "backend-target"
-            desktop_target = root / "desktop-target"
-            runtime_target = root / "runtime-target"
-            for path in (
-                backend_source,
-                desktop_source,
-                backend_target,
-                desktop_target,
-                runtime_target,
-            ):
-                path.mkdir()
-            (backend_source / "new.txt").write_text("new backend", encoding="utf-8")
-            (desktop_source / "new.txt").write_text("new desktop", encoding="utf-8")
-            (backend_target / "old.txt").write_text("old backend", encoding="utf-8")
-            (desktop_target / "old.txt").write_text("old desktop", encoding="utf-8")
-            (runtime_target / "old.txt").write_text("old runtime", encoding="utf-8")
-
-            def install_runtime(target, **_options):
-                target.mkdir(parents=True)
-                (target / "new.txt").write_text("new runtime", encoding="utf-8")
-
-            real_rename = installer.Path.rename
-
-            def fail_runtime_commit(path, destination):
-                if path.name == "payload" and Path(destination) == runtime_target:
-                    raise OSError("injected runtime commit failure")
-                return real_rename(path, destination)
-
-            with (
-                patch.object(
-                    installer,
-                    "install_recognition_runtime",
-                    side_effect=install_runtime,
-                ),
-                patch.object(installer.Path, "rename", fail_runtime_commit),
-            ):
-                with self.assertRaisesRegex(OSError, "runtime commit failure"):
-                    installer.install_bundle(
-                        [
-                            (backend_source, backend_target),
-                            (desktop_source, desktop_target),
-                        ],
-                        runtime_target,
-                        link=False,
-                        force=True,
-                    )
-
-            self.assertEqual(
-                (backend_target / "old.txt").read_text(encoding="utf-8"),
-                "old backend",
-            )
-            self.assertEqual(
-                (desktop_target / "old.txt").read_text(encoding="utf-8"),
-                "old desktop",
-            )
-            self.assertEqual(
-                (runtime_target / "old.txt").read_text(encoding="utf-8"),
-                "old runtime",
-            )
-            self.assertFalse((backend_target / "new.txt").exists())
-            self.assertFalse((desktop_target / "new.txt").exists())
-            self.assertFalse((runtime_target / "new.txt").exists())
-
-    def test_main_installs_one_unified_plugin_payload(self):
+    def test_legacy_symlink_to_checkout_is_quarantined_without_touching_source(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "source"
-            hermes_home = root / "hermes"
+            profile = root / "profile"
+            target = profile / "plugins" / installer.PLUGIN_ID
+            legacy = profile / "desktop-plugins" / installer.LEGACY_PLUGIN_ID
+            write_marker(source, "source")
+            legacy.parent.mkdir(parents=True)
+            legacy.symlink_to(source, target_is_directory=True)
+
+            installer.install_bundle(
+                [(source, target)],
+                link=False,
+                force=False,
+                obsolete_targets=[legacy],
+            )
+
+            self.assertFalse(legacy.exists())
+            self.assertEqual((source / "marker.txt").read_text(), "source")
+            self.assertEqual((target / "marker.txt").read_text(), "source")
+
+    def test_link_mode_promotes_checkout_symlink_and_finishes_legacy_migration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile = root / "profile"
+            target = profile / "plugins" / installer.PLUGIN_ID
+            legacy = profile / "plugins" / installer.LEGACY_PLUGIN_ID
+            write_marker(source, "source")
+            write_marker(legacy, "legacy")
+
+            installer.install_bundle(
+                [(source, target)],
+                link=True,
+                force=False,
+                obsolete_targets=[legacy],
+            )
+
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(target.resolve(), source.resolve())
+            self.assertFalse(legacy.exists())
+            self.assertEqual((source / "marker.txt").read_text(), "source")
+
+    def test_installing_one_profile_never_touches_another_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile_a = root / "profiles" / "a"
+            profile_b = root / "profiles" / "b"
+            write_marker(source, "new")
+            for profile, value in ((profile_a, "a"), (profile_b, "b")):
+                write_marker(profile / "plugins" / installer.LEGACY_PLUGIN_ID, value)
+                write_marker(profile / "desktop-plugins" / installer.LEGACY_PLUGIN_ID, value)
+                write_marker(profile / "plugin-data" / installer.LEGACY_PLUGIN_ID, value)
+
+            with (
+                patch.object(installer, "ROOT", source),
+                patch.object(installer.sys, "argv", ["install.py", "--no-enable"]),
+                patch.object(installer, "resolve_hermes_home", return_value=profile_a),
+                patch("builtins.print"),
+            ):
+                result = installer.main()
+
+            self.assertEqual(result, 0)
+            self.assertTrue((profile_a / "plugins" / installer.PLUGIN_ID).is_dir())
+            for parent in ("plugins", "desktop-plugins", "plugin-data"):
+                self.assertFalse((profile_a / parent / installer.LEGACY_PLUGIN_ID).exists())
+                self.assertEqual(
+                    (profile_b / parent / installer.LEGACY_PLUGIN_ID / "marker.txt").read_text(),
+                    "b",
+                )
+            self.assertFalse((profile_b / "plugins" / installer.PLUGIN_ID).exists())
+
+    def test_main_rejects_symlinked_profile_ancestor_before_cross_profile_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile_a = root / "profiles" / "a"
+            profile_b = root / "profiles" / "b"
+            write_marker(source, "new")
+            profile_a.mkdir(parents=True)
+            (profile_b / "plugins").mkdir(parents=True)
+            profile_a.joinpath("plugins").symlink_to(profile_b / "plugins", target_is_directory=True)
+            write_marker(profile_b / "plugins" / installer.LEGACY_PLUGIN_ID, "profile-b")
+
+            with (
+                patch.object(installer, "ROOT", source),
+                patch.object(installer.sys, "argv", ["install.py", "--no-enable"]),
+                patch.object(installer, "resolve_hermes_home", return_value=profile_a),
+                patch("builtins.print"),
+            ):
+                result = installer.main()
+
+            self.assertEqual(result, 2)
+            self.assertFalse((profile_b / "plugins" / installer.PLUGIN_ID).exists())
+            self.assertEqual(
+                (profile_b / "plugins" / installer.LEGACY_PLUGIN_ID / "marker.txt").read_text(),
+                "profile-b",
+            )
+
+    def test_commit_failure_restores_canonical_and_every_legacy_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile = root / "profile"
+            target = profile / "plugins" / installer.PLUGIN_ID
+            legacy = [
+                profile / "plugins" / installer.LEGACY_PLUGIN_ID,
+                profile / "desktop-plugins" / installer.LEGACY_PLUGIN_ID,
+                profile / "plugin-data" / installer.LEGACY_PLUGIN_ID,
+            ]
+            write_marker(source, "new")
+            write_marker(target, "canonical-old")
+            for index, path in enumerate(legacy):
+                write_marker(path, f"legacy-{index}")
+            observed = {"quarantined": False}
+            real_rename = installer.Path.rename
+
+            def fail_commit(path, destination):
+                if path.name == "payload" and Path(destination) == target:
+                    observed["quarantined"] = all(not legacy_path.exists() for legacy_path in legacy)
+                    raise OSError("commit failed")
+                return real_rename(path, destination)
+
+            with patch.object(installer.Path, "rename", fail_commit):
+                with self.assertRaisesRegex(OSError, "commit failed"):
+                    installer.install_bundle(
+                        [(source, target)],
+                        link=False,
+                        force=True,
+                        obsolete_targets=legacy,
+                    )
+
+            self.assertTrue(observed["quarantined"])
+            self.assertEqual((target / "marker.txt").read_text(), "canonical-old")
+            for index, path in enumerate(legacy):
+                self.assertEqual((path / "marker.txt").read_text(), f"legacy-{index}")
+
+    def test_quarantine_failure_restores_already_moved_legacy_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            target = root / "profile" / "plugins" / installer.PLUGIN_ID
+            legacy = [root / "legacy-a", root / "legacy-b"]
+            write_marker(source, "new")
+            write_marker(legacy[0], "old-a")
+            write_marker(legacy[1], "old-b")
+            real_rename = installer.Path.rename
+
+            def fail_second_quarantine(path, destination):
+                if path == legacy[1]:
+                    raise OSError("quarantine failed")
+                return real_rename(path, destination)
+
+            with patch.object(installer.Path, "rename", fail_second_quarantine):
+                with self.assertRaisesRegex(OSError, "quarantine failed"):
+                    installer.install_bundle(
+                        [(source, target)],
+                        link=False,
+                        force=False,
+                        obsolete_targets=legacy,
+                    )
+            self.assertEqual((legacy[0] / "marker.txt").read_text(), "old-a")
+            self.assertEqual((legacy[1] / "marker.txt").read_text(), "old-b")
+            self.assertFalse(target.exists())
+
+    def test_main_installs_canonical_payload_and_all_legacy_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile = root / "profile"
             source.mkdir()
             captured = {}
 
-            def capture_bundle(targets, recognition_target, **options):
+            def capture(targets, **options):
                 captured["targets"] = targets
-                captured["recognition_target"] = recognition_target
                 captured["options"] = options
 
-            argv = ["install.py", "--no-enable"]
             with (
                 patch.object(installer, "ROOT", source),
-                patch.object(installer.sys, "argv", argv),
-                patch.object(installer, "resolve_hermes_home", return_value=hermes_home),
-                patch.object(installer, "install_bundle", side_effect=capture_bundle),
+                patch.object(installer.sys, "argv", ["install.py", "--no-enable"]),
+                patch.object(installer, "resolve_hermes_home", return_value=profile),
+                patch.object(installer, "install_bundle", side_effect=capture),
                 patch("builtins.print"),
             ):
-                exit_code = installer.main()
+                result = installer.main()
 
-            self.assertEqual(exit_code, 0)
+            self.assertEqual(result, 0)
             self.assertEqual(
                 captured["targets"],
+                [(source, profile / "plugins" / "lyrics-for-hermes")],
+            )
+            self.assertEqual(
+                captured["options"]["obsolete_targets"],
                 [
-                    (
-                        source,
-                        hermes_home / "plugins" / "apple-music-lyrics",
-                    )
+                    profile / "plugins" / "apple-music-lyrics",
+                    profile / "desktop-plugins" / "apple-music-lyrics",
+                    profile / "plugin-data" / "apple-music-lyrics",
                 ],
             )
 
-    def test_main_marks_the_standalone_desktop_copy_obsolete(self):
+    def test_activation_updates_enabled_ids_without_plugin_discovery(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "source"
-            hermes_home = root / "hermes"
-            source.mkdir()
-            captured = {}
+            profile = Path(temp) / "profile"
+            calls = []
+            responses = iter(
+                [
+                    (0, '["other","apple-music-lyrics"]'),
+                    (0, ""),
+                    (0, '["other","lyrics-for-hermes"]'),
+                ]
+            )
 
-            def capture_bundle(_targets, _recognition_target, **options):
-                captured.update(options)
+            class Completed:
+                def __init__(self, returncode, stdout):
+                    self.returncode = returncode
+                    self.stdout = stdout
 
-            argv = ["install.py", "--no-enable"]
+            def run(command, **options):
+                calls.append((command, options))
+                returncode, stdout = next(responses)
+                return Completed(returncode, stdout)
+
             with (
-                patch.object(installer, "ROOT", source),
-                patch.object(installer.sys, "argv", argv),
-                patch.object(installer, "resolve_hermes_home", return_value=hermes_home),
-                patch.object(installer, "install_bundle", side_effect=capture_bundle),
-                patch("builtins.print"),
+                patch.object(installer, "_profile_home_from_cli", return_value=profile.resolve()),
+                patch.object(installer.subprocess, "run", side_effect=run),
             ):
-                exit_code = installer.main()
+                result = installer._activate_plugin("/usr/local/bin/hermes", profile)
 
-            self.assertEqual(exit_code, 0)
+            self.assertEqual(result, 0)
             self.assertEqual(
-                captured.get("obsolete_targets"),
-                [hermes_home / "desktop-plugins" / "apple-music-lyrics"],
+                [call[0][1:] for call in calls],
+                [
+                    ["config", "get", "--json", "plugins.enabled"],
+                    ["config", "set", "plugins.enabled", '["other","lyrics-for-hermes"]'],
+                    ["config", "get", "--json", "plugins.enabled"],
+                ],
             )
+            self.assertTrue(all(call[1]["env"]["HERMES_HOME"] == str(profile) for call in calls))
 
-    def test_main_rejects_the_obsolete_desktop_only_mode_before_installing(self):
-        argv = ["install.py", "--desktop-only", "--no-enable"]
-        with (
-            patch.object(installer.sys, "argv", argv),
-            patch.object(installer.sys, "stderr", io.StringIO()),
-            patch.object(installer, "install_bundle") as install_bundle,
-        ):
-            with self.assertRaises(SystemExit) as raised:
-                installer.main()
-
-        self.assertEqual(raised.exception.code, 2)
-        install_bundle.assert_not_called()
-
-    def test_bundle_removes_the_legacy_desktop_copy_after_success(self):
+    def test_activation_rejects_a_different_active_profile_before_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "source"
-            unified_target = root / "plugins" / "apple-music-lyrics"
-            standalone_target = root / "desktop-plugins" / "apple-music-lyrics"
-            runtime_target = root / "plugin-data" / "recognition-venv"
-            (source / "desktop").mkdir(parents=True)
-            (source / "desktop" / "plugin.js").write_text(
-                "export default {}",
-                encoding="utf-8",
-            )
-            standalone_target.mkdir(parents=True)
-            (standalone_target / "plugin.js").write_text(
-                "legacy",
-                encoding="utf-8",
-            )
-
-            def install_runtime(target, **_options):
-                (target / "bin").mkdir(parents=True)
-                (target / "bin" / "python").write_text("python", encoding="utf-8")
-
-            with patch.object(
-                installer,
-                "install_recognition_runtime",
-                side_effect=install_runtime,
-            ):
-                installer.install_bundle(
-                    [(source, unified_target)],
-                    runtime_target,
-                    link=False,
-                    force=False,
-                    obsolete_targets=[standalone_target],
-                )
-
-            discovered = [
-                path
-                for path in (
-                    unified_target / "desktop" / "plugin.js",
-                    standalone_target / "plugin.js",
-                )
-                if path.is_file()
-            ]
-            self.assertEqual(discovered, [unified_target / "desktop" / "plugin.js"])
-            self.assertTrue((runtime_target / "bin" / "python").is_file())
-
-    def test_bundle_restores_a_quarantined_legacy_copy_after_commit_failure(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "source"
-            unified_target = root / "plugins" / "apple-music-lyrics"
-            standalone_target = root / "desktop-plugins" / "apple-music-lyrics"
-            runtime_target = root / "plugin-data" / "recognition-venv"
-            (source / "desktop").mkdir(parents=True)
-            (source / "desktop" / "plugin.js").write_text("new", encoding="utf-8")
-            standalone_target.mkdir(parents=True)
-            legacy = standalone_target / "plugin.js"
-            legacy.write_text("legacy", encoding="utf-8")
-            runtime_target.mkdir(parents=True)
-            (runtime_target / "old.txt").write_text("old runtime", encoding="utf-8")
-            observed = {"legacy_quarantined": False}
-
-            def install_runtime(target, **_options):
-                (target / "bin").mkdir(parents=True)
-                (target / "bin" / "python").write_text("python", encoding="utf-8")
-
-            real_rename = installer.Path.rename
-
-            def fail_runtime_commit(path, destination):
-                if path.name == "payload" and Path(destination) == runtime_target:
-                    observed["legacy_quarantined"] = not standalone_target.exists()
-                    raise OSError("injected runtime commit failure")
-                return real_rename(path, destination)
-
+            profile = Path(temp) / "profile"
+            other = Path(temp) / "other"
             with (
-                patch.object(
-                    installer,
-                    "install_recognition_runtime",
-                    side_effect=install_runtime,
-                ),
-                patch.object(installer.Path, "rename", fail_runtime_commit),
+                patch.object(installer, "_profile_home_from_cli", return_value=other.resolve()),
+                patch.object(installer.subprocess, "run") as run,
             ):
-                with self.assertRaisesRegex(OSError, "runtime commit failure"):
+                with self.assertRaisesRegex(RuntimeError, "active profile"):
+                    installer._activate_plugin("hermes", profile)
+            run.assert_not_called()
+
+    def test_activation_failure_restores_existing_canonical_and_all_legacy_paths_for_copy_and_link(self):
+        for link in (False, True):
+            with self.subTest(link=link), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / "source"
+                profile = root / "profile"
+                target = profile / "plugins" / installer.PLUGIN_ID
+                legacy = [
+                    profile / "plugins" / installer.LEGACY_PLUGIN_ID,
+                    profile / "desktop-plugins" / installer.LEGACY_PLUGIN_ID,
+                    profile / "plugin-data" / installer.LEGACY_PLUGIN_ID,
+                ]
+                write_marker(source, "new")
+                write_marker(target, "canonical-old")
+                for index, path in enumerate(legacy):
+                    write_marker(path, f"legacy-{index}")
+
+                with self.assertRaisesRegex(RuntimeError, "enable failed"):
                     installer.install_bundle(
-                        [(source, unified_target)],
-                        runtime_target,
-                        link=False,
+                        [(source, target)],
+                        link=link,
                         force=True,
-                        obsolete_targets=[standalone_target],
+                        obsolete_targets=legacy,
+                        activate=lambda: (_ for _ in ()).throw(RuntimeError("enable failed")),
                     )
 
-            self.assertTrue(observed["legacy_quarantined"])
-            self.assertEqual(legacy.read_text(encoding="utf-8"), "legacy")
-            self.assertFalse(unified_target.exists())
-            self.assertEqual(
-                (runtime_target / "old.txt").read_text(encoding="utf-8"),
-                "old runtime",
-            )
+                self.assertEqual((target / "marker.txt").read_text(), "canonical-old")
+                for index, path in enumerate(legacy):
+                    self.assertEqual((path / "marker.txt").read_text(), f"legacy-{index}")
 
-    def test_main_does_not_touch_runtime_when_plugin_staging_fails(self):
+    def test_activation_set_failure_restores_prior_enabled_ids(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "source"
-            desktop_source = source / "desktop"
-            hermes_home = root / "hermes"
-            backend_target = hermes_home / "plugins" / "apple-music-lyrics"
-            desktop_target = (
-                hermes_home / "desktop-plugins" / "apple-music-lyrics"
+            profile = Path(temp) / "profile"
+            calls = []
+            responses = iter(
+                [
+                    (0, '["apple-music-lyrics","lyrics-for-hermes"]'),
+                    (7, ""),
+                    (0, ""),
+                ]
             )
-            runtime_target = (
-                hermes_home
-                / "plugin-data"
-                / "apple-music-lyrics"
-                / "recognition-venv"
-            )
-            desktop_source.mkdir(parents=True)
-            backend_target.mkdir(parents=True)
-            desktop_target.mkdir(parents=True)
-            runtime_target.mkdir(parents=True)
-            (source / "new-backend.txt").write_text("new", encoding="utf-8")
-            (desktop_source / "new-desktop.txt").write_text("new", encoding="utf-8")
-            (backend_target / "old.txt").write_text("old backend", encoding="utf-8")
-            (desktop_target / "old.txt").write_text("old desktop", encoding="utf-8")
-            (runtime_target / "old.txt").write_text("old runtime", encoding="utf-8")
 
-            runtime_calls = []
+            class Completed:
+                def __init__(self, returncode, stdout):
+                    self.returncode = returncode
+                    self.stdout = stdout
 
-            def install_runtime(target, **_options):
-                runtime_calls.append(target)
-                installer.remove_target(target)
-                target.mkdir(parents=True)
-                (target / "new.txt").write_text("new runtime", encoding="utf-8")
+            def run(command, **options):
+                calls.append((command, options))
+                returncode, stdout = next(responses)
+                return Completed(returncode, stdout)
 
-            real_copytree = installer.shutil.copytree
-
-            def fail_desktop_copy(copy_source, *args, **kwargs):
-                if Path(copy_source) == desktop_source:
-                    raise OSError("injected desktop staging failure")
-                return real_copytree(copy_source, *args, **kwargs)
-
-            argv = ["install.py", "--force", "--no-enable"]
             with (
-                patch.object(installer, "ROOT", source),
-                patch.object(installer.sys, "argv", argv),
-                patch.object(installer, "resolve_hermes_home", return_value=hermes_home),
-                patch.object(
-                    installer,
-                    "install_recognition_runtime",
-                    side_effect=install_runtime,
-                ),
-                patch.object(
-                    installer.shutil,
-                    "copytree",
-                    side_effect=fail_desktop_copy,
-                ),
+                patch.object(installer, "_profile_home_from_cli", return_value=profile.resolve()),
+                patch.object(installer.subprocess, "run", side_effect=run),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "enabled-plugin update failed"):
+                    installer._activate_plugin("/usr/local/bin/hermes", profile)
+
+            self.assertEqual(
+                [call[0][1:] for call in calls],
+                [
+                    ["config", "get", "--json", "plugins.enabled"],
+                    ["config", "set", "plugins.enabled", '["lyrics-for-hermes"]'],
+                    [
+                        "config",
+                        "set",
+                        "plugins.enabled",
+                        '["apple-music-lyrics","lyrics-for-hermes"]',
+                    ],
+                ],
+            )
+
+    def test_activation_verification_failure_restores_prior_enabled_ids(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp) / "profile"
+            calls = []
+            responses = iter(
+                [
+                    (0, '["apple-music-lyrics"]'),
+                    (0, ""),
+                    (0, '["apple-music-lyrics"]'),
+                    (0, ""),
+                ]
+            )
+
+            class Completed:
+                def __init__(self, returncode, stdout):
+                    self.returncode = returncode
+                    self.stdout = stdout
+
+            def run(command, **options):
+                calls.append((command, options))
+                returncode, stdout = next(responses)
+                return Completed(returncode, stdout)
+
+            with (
+                patch.object(installer, "_profile_home_from_cli", return_value=profile.resolve()),
+                patch.object(installer.subprocess, "run", side_effect=run),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "verification failed"):
+                    installer._activate_plugin("/usr/local/bin/hermes", profile)
+
+            self.assertEqual(
+                [call[0][1:] for call in calls],
+                [
+                    ["config", "get", "--json", "plugins.enabled"],
+                    ["config", "set", "plugins.enabled", '["lyrics-for-hermes"]'],
+                    ["config", "get", "--json", "plugins.enabled"],
+                    ["config", "set", "plugins.enabled", '["apple-music-lyrics"]'],
+                ],
+            )
+
+    def test_main_activates_only_after_filesystem_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp) / "profile"
+            events = []
+
+            def install(*_args, **options):
+                events.append("filesystem")
+                options["activate"]()
+
+            def activate(*_args, **_kwargs):
+                events.append("activate")
+                return 0
+
+            with (
+                patch.object(installer.sys, "argv", ["install.py"]),
+                patch.object(installer, "resolve_hermes_home", return_value=profile),
+                patch.object(installer, "install_bundle", side_effect=install),
+                patch.object(installer.shutil, "which", return_value="hermes"),
+                patch.object(installer, "_profile_home_from_cli", return_value=profile.resolve()),
+                patch.object(installer, "_activate_plugin", side_effect=activate),
                 patch("builtins.print"),
             ):
-                exit_code = installer.main()
+                result = installer.main()
+            self.assertEqual(result, 0)
+            self.assertEqual(events, ["filesystem", "activate"])
 
-            self.assertEqual(exit_code, 2)
-            self.assertEqual(runtime_calls, [])
-            self.assertTrue((runtime_target / "old.txt").is_file())
-            self.assertEqual(
-                (runtime_target / "old.txt").read_text(encoding="utf-8"),
-                "old runtime",
-            )
-            self.assertFalse((runtime_target / "new.txt").exists())
-            self.assertEqual(
-                (backend_target / "old.txt").read_text(encoding="utf-8"),
-                "old backend",
-            )
-            self.assertEqual(
-                (desktop_target / "old.txt").read_text(encoding="utf-8"),
-                "old desktop",
-            )
-
-    def test_main_builds_runtime_offline_before_committing_unified_targets(self):
+    def test_main_does_not_activate_after_filesystem_failure(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "source"
-            desktop_source = source / "desktop"
-            hermes_home = root / "hermes"
-            backend_target = hermes_home / "plugins" / "apple-music-lyrics"
-            desktop_target = hermes_home / "desktop-plugins" / "apple-music-lyrics"
-            runtime_target = (
-                hermes_home
-                / "plugin-data"
-                / "apple-music-lyrics"
-                / "recognition-venv"
-            )
-            desktop_source.mkdir(parents=True)
-            (source / "backend.txt").write_text("backend", encoding="utf-8")
-            (desktop_source / "desktop.txt").write_text("desktop", encoding="utf-8")
-            runtime_calls = []
-
-            def install_runtime(target, **kwargs):
-                runtime_calls.append(
-                    (
-                        target,
-                        kwargs,
-                        backend_target.exists(),
-                        desktop_target.exists(),
-                        runtime_target.exists(),
-                    )
-                )
-                (target / "bin").mkdir(parents=True)
-                (target / "bin" / "python").write_text("python", encoding="utf-8")
-
-            argv = ["install.py", "--no-enable"]
+            profile = Path(temp) / "profile"
             with (
-                patch.object(installer, "ROOT", source),
-                patch.object(installer.sys, "argv", argv),
-                patch.object(installer, "resolve_hermes_home", return_value=hermes_home),
-                patch.object(
-                    installer,
-                    "install_recognition_runtime",
-                    side_effect=install_runtime,
-                ),
+                patch.object(installer.sys, "argv", ["install.py"]),
+                patch.object(installer, "resolve_hermes_home", return_value=profile),
+                patch.object(installer, "install_bundle", side_effect=OSError("failed")),
+                patch.object(installer, "_activate_plugin") as activate,
                 patch("builtins.print"),
             ):
-                exit_code = installer.main()
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(len(runtime_calls), 1)
-            staged_runtime, _kwargs, backend_live, desktop_live, runtime_live = (
-                runtime_calls[0]
-            )
-            self.assertNotEqual(staged_runtime, runtime_target)
-            self.assertFalse(backend_live)
-            self.assertFalse(desktop_live)
-            self.assertFalse(runtime_live)
-            self.assertEqual(
-                (backend_target / "backend.txt").read_text(encoding="utf-8"),
-                "backend",
-            )
-            self.assertEqual(
-                (backend_target / "desktop" / "desktop.txt").read_text(
-                    encoding="utf-8"
-                ),
-                "desktop",
-            )
-            self.assertFalse(desktop_target.exists())
-            self.assertTrue((runtime_target / "bin" / "python").is_file())
+                result = installer.main()
+            self.assertEqual(result, 2)
+            activate.assert_not_called()
 
 
 if __name__ == "__main__":

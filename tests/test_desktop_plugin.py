@@ -31,11 +31,12 @@ class DesktopPluginContractTests(unittest.TestCase):
         )
         self.assertNotRegex(source, r"</?[A-Za-z][^>]*>")
 
-    def test_plugin_registers_pane_page_sidebar_status_and_palette(self):
+    def test_plugin_registers_every_supported_extension_area(self):
         source = PLUGIN.read_text(encoding="utf-8")
 
-        self.assertIn("id: ID", source)
-        self.assertIn("const ID = 'apple-music-lyrics'", source)
+        self.assertIn("const ID = 'lyrics-for-hermes'", source)
+        self.assertIn("const ROUTE = '/lyrics-for-hermes'", source)
+        self.assertIn("name: 'Lyrics for Hermes'", source)
         for contribution in (
             "PANES_AREA",
             "ROUTES_AREA",
@@ -44,8 +45,16 @@ class DesktopPluginContractTests(unittest.TestCase):
             "PALETTE_AREA",
         ):
             self.assertIn(contribution, source)
+        self.assertIn("ctx.registerMany([", source)
+        self.assertIn("id: 'lyrics-for-hermes.open'", source)
+
+    def test_plugin_retains_react_query_and_active_profile_safety(self):
+        source = PLUGIN.read_text(encoding="utf-8")
+
+        self.assertIn("useQuery", source)
+        self.assertIn("useMutation", source)
+        self.assertIn("useQueryClient", source)
         self.assertIn("const data = query.isError ? undefined : retainedData", source)
-        self.assertIn("Microphone status unknown", source)
         self.assertIn("Music status unknown", source)
         self.assertIn("host.state.profile", source)
         self.assertRegex(source, r"queryKey\([^)]*profile")
@@ -53,106 +62,53 @@ class DesktopPluginContractTests(unittest.TestCase):
         self.assertIn("'/permissions'", source)
         self.assertNotIn("x-apple.systempreferences", source)
 
-    def test_plugin_description_mentions_nearby_recognition(self):
+    def test_removed_provider_has_no_desktop_routes_or_visible_ui(self):
         source = PLUGIN.read_text(encoding="utf-8")
 
-        self.assertRegex(source, r"description: '[^']*Nearby[^']*'")
+        for forbidden in (
+            "SegmentedControl",
+            "Nearby",
+            "Shazam",
+            "Microphone",
+            "'/source'",
+            "'/ambient/",
+            "source === 'ambient'",
+        ):
+            self.assertNotIn(forbidden, source)
 
-    def test_ambient_ui_has_an_explicit_source_switch(self):
+    def test_play_pause_button_uses_explicit_transport_semantics(self):
         source = PLUGIN.read_text(encoding="utf-8")
+        music_source = (
+            ROOT / "dashboard" / "apple_music_lyrics_backend" / "music.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("SegmentedControl", source)
-        self.assertIn("{ id: 'music_app', label: 'Music.app' }", source)
-        self.assertIn("{ id: 'ambient', label: 'Nearby' }", source)
-        self.assertIn("path: '/source'", source)
-        self.assertIn("body: { source: nextSource }", source)
+        self.assertIn("label: track.state === 'playing' ? 'Pause' : 'Play'", source)
+        self.assertIn("runAction(track.state === 'playing' ? 'pause' : 'play')", source)
+        self.assertNotIn("runAction('play_pause')", source)
+        self.assertIn('"play":', music_source)
+        self.assertIn('"pause":', music_source)
 
-    def test_ambient_ui_has_separate_listen_and_stop_actions(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
-        self.assertIn("path: '/ambient/listen'", source)
-        self.assertIn("path: '/ambient/stop'", source)
-        self.assertIn("Listen for 8 seconds", source)
-        self.assertIn("Microphone active", source)
-
-    def test_ambient_ui_discloses_the_unofficial_network_provider(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
-        self.assertIn("Unofficial Shazam fingerprint service", source)
-        self.assertIn("request metadata and your IP address", source)
-        self.assertIn("track metadata is sent to LRCLIB", source)
-        self.assertIn("Audio is not saved", source)
-
-    def test_ambient_ui_discloses_the_recognized_artwork_cdn(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
-        self.assertIn("Apple's mzstatic.com CDN", source)
-        self.assertIn("image request and your IP address", source)
-
-    def test_readme_discloses_both_nearby_network_recipients(self):
-        source = (ROOT / "README.md").read_text(encoding="utf-8")
-
-        self.assertIn("Shazam infrastructure receives the fingerprint", source)
-        self.assertIn("After a Nearby match, LRCLIB receives track metadata", source)
-
-    def test_readme_documents_the_in_memory_capture_encoding(self):
-        source = (ROOT / "README.md").read_text(encoding="utf-8")
-
-        self.assertIn("FFmpeg with AVFoundation and `libvorbis` support", source)
-        self.assertIn("encoded as Ogg Vorbis in process memory", source)
-
-    def test_readme_labels_the_private_offset_as_an_assumption(self):
-        source = (ROOT / "README.md").read_text(encoding="utf-8")
-
-        self.assertIn(
-            "treated as the reference-track time matching the start of the captured query",
-            source,
-        )
-        self.assertIn("private endpoint is unofficial", source)
-
-    def test_ambient_track_hides_music_app_transport_controls(self):
+    def test_controls_and_seek_respect_backend_capabilities(self):
         source = PLUGIN.read_text(encoding="utf-8")
 
         self.assertIn("const canControl = track.can_control !== false", source)
         self.assertIn("canControl &&", source)
-
-    def test_ambient_timeline_is_read_only_progress(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
         self.assertIn("const canSeek = track.can_seek !== false", source)
         self.assertIn("role: canSeek ? 'slider' : 'progressbar'", source)
         self.assertIn("onClick: canSeek ? seekFromEvent : undefined", source)
-
-    def test_tracks_without_duration_omit_the_timeline(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
-        self.assertGreaterEqual(source.count("track.duration > 0 &&"), 2)
-
-    def test_ambient_lyric_lines_never_seek_music_app(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
         self.assertIn("function LyricsScroller({ canSeek,", source)
         self.assertIn("disabled: !canSeek || !lyrics.synced || working", source)
-        self.assertIn("canSeek: data.track.can_seek !== false", source)
+        self.assertGreaterEqual(source.count("track.duration > 0 &&"), 2)
 
-    def test_ambient_artwork_does_not_query_music_app(self):
+    def test_highlighting_auto_scroll_and_reduced_motion_are_retained(self):
         source = PLUGIN.read_text(encoding="utf-8")
 
-        self.assertIn("data?.track?.source !== 'ambient'", source)
-
-    def test_ambient_artwork_uses_the_recognized_remote_image(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
-        self.assertIn(
-            "ambientArtwork ? { url: cachedArtworkUrl, fallbackUrl: null }",
-            source,
-        )
-
-    def test_ambient_match_without_lyrics_has_ambient_guidance(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
-        self.assertIn("Song identified, but no synchronized lyrics were found", source)
-        self.assertIn("children: source === 'ambient' ? 'Listen again' : 'Refresh lyrics'", source)
+        self.assertIn("function findCurrentIndex", source)
+        self.assertIn("function ActiveLyric", source)
+        self.assertIn("scrollIntoView", source)
+        self.assertIn("prefers-reduced-motion: reduce", source)
+        self.assertIn("behavior: reduceMotion ? 'auto' : 'smooth'", source)
+        self.assertIn("Resume following", source)
 
     def test_styles_use_theme_variables_instead_of_hardcoded_colors(self):
         source = PLUGIN.read_text(encoding="utf-8")
@@ -160,14 +116,10 @@ class DesktopPluginContractTests(unittest.TestCase):
         self.assertNotRegex(source, r"#[0-9A-Fa-f]{3,8}\b")
         self.assertNotRegex(source, r"\brgb(?:a)?\(")
         self.assertIn("var(--ui-accent)", source)
-
-    def test_seek_focus_ring_uses_a_shipped_host_utility(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
         self.assertIn("focus-visible:ring-ring/40", source)
         self.assertNotRegex(source, r"focus-visible:ring-ring(?:\\s|['\"])")
 
-    def test_music_artwork_is_loaded_independently_of_the_lyrics_provider(self):
+    def test_music_artwork_is_loaded_independently_of_lyrics(self):
         source = PLUGIN.read_text(encoding="utf-8")
 
         self.assertIn("function useMusicArtwork", source)
@@ -178,35 +130,38 @@ class DesktopPluginContractTests(unittest.TestCase):
         )
         self.assertIn("data?.artwork?.remote_url", source)
         self.assertIn("selectArtworkSources", source)
-        self.assertIn("artworkUrl", source)
         self.assertNotIn("url: lyrics?.artwork_url", source)
-        self.assertIn("hostname.endsWith('.mzstatic.com')", source)
-        self.assertIn("!parsed.username", source)
-        self.assertIn("!parsed.password", source)
-        self.assertIn("parsed.port === '' || parsed.port === '443'", source)
-        self.assertIn("data:image/(?:jpeg|png);base64", source)
 
-    def test_artwork_cache_is_bounded_and_refresh_is_profile_scoped(self):
+    def test_artwork_validation_fallback_and_cache_bounds_are_retained(self):
         source = PLUGIN.read_text(encoding="utf-8")
 
-        self.assertIn("const artworkProfileQueryKey", source)
-        self.assertIn("staleTime: 300000", source)
-        self.assertIn("gcTime: 10000", source)
-        self.assertIn("retry: artworkRetry", source)
-        self.assertIn("refetchOnMount: false", source)
-        self.assertIn(
+        for expected in (
+            "hostname.endsWith('.mzstatic.com')",
+            "!parsed.username",
+            "!parsed.password",
+            "parsed.port === '' || parsed.port === '443'",
+            "data:image/(?:jpeg|png);base64",
+            "if (value.length > 2048) return null",
+            "function Artwork({ url, fallbackUrl, compact })",
+            "fallbackUrl: artworkFallbackUrl",
+            "candidates.find",
+            "const artworkProfileQueryKey",
+            "staleTime: 300000",
+            "gcTime: 10000",
+            "retry: artworkRetry",
+            "refetchOnMount: false",
             "queryKey: artworkProfileQueryKey(ctx, profile)",
-            source,
-        )
-
-    def test_artwork_validation_and_decode_failure_preserve_apple_fallback(self):
-        source = PLUGIN.read_text(encoding="utf-8")
-
-        self.assertIn("if (value.length > 2048) return null", source)
-        self.assertIn("function Artwork({ url, fallbackUrl, compact })", source)
-        self.assertIn("fallbackUrl: artworkFallbackUrl", source)
-        self.assertIn("candidates.find", source)
+        ):
+            self.assertIn(expected, source)
         self.assertGreaterEqual(source.count("() => safeArtworkUrl"), 4)
+
+    def test_runtime_and_readme_have_no_stale_visible_provider_branding(self):
+        visible = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (PLUGIN, ROOT / "dashboard" / "dist" / "index.js", ROOT / "README.md")
+        )
+        for forbidden in ("Shazam", "Nearby", "private cache", "Apple Music Lyrics"):
+            self.assertNotIn(forbidden, visible)
 
     def test_artwork_query_and_fallback_runtime_contract(self):
         node = shutil.which("node")
@@ -222,34 +177,25 @@ class DesktopPluginContractTests(unittest.TestCase):
 
     def test_cached_state_poll_failures_are_visibly_unknown_at_runtime(self):
         node = shutil.which("node")
-        if node is None:
-            self.fail("node is required for the desktop runtime check")
-        hermes_repository = Path(
-            os.environ.get(
-                "HERMES_REPO_ROOT",
-                Path.home() / ".hermes" / "hermes-agent",
-            )
-        )
+        self.assertIsNotNone(node, "node is required for the desktop runtime check")
+        hermes_repository = Path(os.environ.get("HERMES_REPO_ROOT", ROOT))
         react_runtime = hermes_repository / "node_modules" / "react" / "index.js"
         if not react_runtime.is_file():
-            self.skipTest("Hermes desktop React runtime is not installed")
+            self.skipTest("desktop React runtime is not installed")
 
         environment = os.environ.copy()
         environment.update(
             {
                 "HERMES_REPO_ROOT": str(hermes_repository),
                 "PLUGIN_PATH": str(PLUGIN),
-                "SDK_SHIM_PATH": str(
-                    ROOT / "tests" / "desktop_plugin_sdk_shim.mjs"
-                ),
+                "SDK_SHIM_PATH": str(ROOT / "tests" / "desktop_plugin_sdk_shim.mjs"),
             }
         )
         completed = subprocess.run(
             [
                 node,
-                "--no-warnings",
-                "--experimental-loader",
-                str(ROOT / "tests" / "desktop_plugin_loader.mjs"),
+                "--import",
+                str(ROOT / "tests" / "register_desktop_plugin_loader.mjs"),
                 str(ROOT / "tests" / "desktop_state_failure_runtime.mjs"),
             ],
             cwd=ROOT,

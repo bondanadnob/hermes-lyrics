@@ -2,17 +2,25 @@ import asyncio
 import concurrent.futures
 import json
 import runpy
-import tempfile
 import time
 import tomllib
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from fastapi import FastAPI, HTTPException, Response
 
 
-async def asgi_get(app, path, query_string=""):
+async def asgi_request(
+    app,
+    path,
+    *,
+    method="GET",
+    query_string="",
+    body=b"",
+    client=("127.0.0.1", 1),
+    headers=None,
+    include_body=False,
+):
     messages = []
     received = False
 
@@ -20,7 +28,7 @@ async def asgi_get(app, path, query_string=""):
         nonlocal received
         if not received:
             received = True
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.request", "body": body, "more_body": False}
         return {"type": "http.disconnect"}
 
     async def send(message):
@@ -31,20 +39,28 @@ async def asgi_get(app, path, query_string=""):
             "type": "http",
             "asgi": {"version": "3.0"},
             "http_version": "1.1",
-            "method": "GET",
+            "method": method,
             "scheme": "http",
             "path": path,
             "raw_path": path.encode("ascii"),
             "query_string": query_string.encode("ascii"),
-            "headers": [],
-            "client": ("127.0.0.1", 1),
+            "headers": headers or [],
+            "client": client,
             "server": ("127.0.0.1", 80),
         },
         receive,
         send,
     )
     start = next(message for message in messages if message["type"] == "http.response.start")
-    return start["status"], {key.decode(): value.decode() for key, value in start["headers"]}
+    response_headers = {key.decode(): value.decode() for key, value in start["headers"]}
+    if include_body:
+        response_body = b"".join(
+            message.get("body", b"")
+            for message in messages
+            if message["type"] == "http.response.body"
+        )
+        return start["status"], response_headers, response_body
+    return start["status"], response_headers
 
 
 class FakeService:
@@ -84,32 +100,22 @@ class FakeService:
     def open_automation_settings(self):
         self.calls.append(("permissions", None))
 
-    def select_source(self, source):
-        self.calls.append(("source", source))
-
-    def listen_ambient(self):
-        self.calls.append(("ambient_listen", None))
-
-    def stop_ambient(self):
-        self.calls.append(("ambient_stop", None))
-
 
 class PluginAPITests(unittest.TestCase):
     def test_manifest_uses_the_current_dashboard_api_contract(self):
         manifest_path = Path(__file__).resolve().parents[1] / "dashboard" / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(manifest["name"], "apple-music-lyrics")
+        self.assertEqual(manifest["name"], "lyrics-for-hermes")
+        self.assertEqual(manifest["label"], "Lyrics for Hermes")
         self.assertEqual(manifest["api"], "plugin_api.py")
         self.assertTrue(manifest["tab"]["hidden"])
-        entry = manifest_path.parent / manifest["entry"]
-        self.assertTrue(entry.is_file(), entry)
+        self.assertTrue((manifest_path.parent / manifest["entry"]).is_file())
 
-    def test_router_exposes_state_controls_seek_refresh_permissions_and_health(self):
+    def test_router_exposes_only_retained_routes(self):
         from dashboard import plugin_api
 
         paths = {route.path for route in plugin_api.router.routes}
-
         self.assertEqual(
             paths,
             {
@@ -119,18 +125,18 @@ class PluginAPITests(unittest.TestCase):
                 "/seek",
                 "/refresh",
                 "/permissions",
-                "/source",
-                "/ambient/listen",
-                "/ambient/stop",
                 "/health",
             },
         )
 
-    def test_default_service_routes_music_through_the_ambient_playback_router(self):
+    def test_default_service_uses_music_app_and_lrclib(self):
         from dashboard import plugin_api
-        from dashboard.apple_music_lyrics_backend.ambient import PlaybackRouter
+        from dashboard.apple_music_lyrics_backend.lrclib import LRCLIBProvider
+        from dashboard.apple_music_lyrics_backend.music import MusicClient
 
-        self.assertIsInstance(plugin_api._service.music, PlaybackRouter)
+        self.assertIsInstance(plugin_api._service.music, MusicClient)
+        self.assertEqual(len(plugin_api._service.providers), 1)
+        self.assertIsInstance(plugin_api._service.providers[0], LRCLIBProvider)
 
     def test_router_registers_backend_shutdown_cleanup(self):
         from dashboard import plugin_api
@@ -147,58 +153,32 @@ class PluginAPITests(unittest.TestCase):
             if getattr(handler, "__name__", "") == "_shutdown_plugin"
         ]
         self.assertEqual(len(handlers), 1)
-
         previous = plugin_api._playback
         plugin_api._playback = Playback()
         try:
             handlers[0]()
         finally:
             plugin_api._playback = previous
-
         self.assertEqual(calls, ["shutdown"])
 
-    def test_backend_does_not_select_ffmpeg_from_inherited_path(self):
+    def test_backend_has_no_removed_runtime_or_broad_exception_tuple(self):
         from dashboard import plugin_api
 
         source = Path(plugin_api.__file__).read_text(encoding="utf-8")
-        self.assertNotIn('shutil.which("ffmpeg")', source)
+        for forbidden in ("ambient", "recognition", "shutil.which(\"ffmpeg\")"):
+            self.assertNotIn(forbidden, source.casefold())
+        self.assertNotRegex(source, r"except\s*\([^)]*\bException\b")
 
-    def test_health_discloses_experimental_ambient_provider_and_readiness(self):
+    def test_health_discloses_only_public_retained_providers(self):
         from dashboard import plugin_api
-        from dashboard.apple_music_lyrics_backend.ambient import AmbientRuntimePaths
 
-        previous_paths = plugin_api._ambient_paths
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            python = root / "python"
-            worker = root / "ambient_worker.py"
-            ffmpeg = root / "ffmpeg"
-            for executable in (python, ffmpeg):
-                executable.write_text("", encoding="utf-8")
-                executable.chmod(0o755)
-            worker.write_text("", encoding="utf-8")
-            plugin_api._ambient_paths = AmbientRuntimePaths(
-                python_executable=python,
-                worker_script=worker,
-                ffmpeg_executable=ffmpeg,
-            )
-            try:
-                with patch.object(plugin_api.platform, "system", return_value="Darwin"):
-                    health = asyncio.run(plugin_api.get_health())
-            finally:
-                plugin_api._ambient_paths = previous_paths
-
-        self.assertIn("ambientRecognition", health)
-        recognition = health["ambientRecognition"]
-        self.assertTrue(recognition["available"])
-        self.assertTrue(recognition["experimental"])
-        self.assertEqual(recognition["provider"], "ShazamIO")
-        self.assertEqual(
-            recognition["networkPayload"],
-            "audio_fingerprint_and_protocol_metadata",
-        )
-        self.assertEqual(recognition["lyricsLookup"], "track_metadata_to_lrclib")
-        self.assertEqual(recognition["sampleSeconds"], 8)
+        response = Response()
+        health = asyncio.run(plugin_api.get_health(response))
+        self.assertEqual(health["version"], "0.3.0")
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+        self.assertEqual(health["providers"], ["Music.app", "LRCLIB"])
+        self.assertFalse(health["microphone"])
+        self.assertFalse(health["privateProviders"])
 
     def test_endpoint_functions_delegate_to_service(self):
         from dashboard import plugin_api
@@ -211,16 +191,29 @@ class PluginAPITests(unittest.TestCase):
             artwork_response = Response()
             state = asyncio.run(plugin_api.get_state(state_response))
             identity = "a" * 24
-            artwork = asyncio.run(
-                plugin_api.get_artwork(artwork_response, identity=identity)
+            artwork = asyncio.run(plugin_api.get_artwork(artwork_response, identity=identity))
+            app = FastAPI()
+            app.include_router(plugin_api.router)
+            control_status, _ = asyncio.run(
+                asgi_request(
+                    app,
+                    "/control",
+                    method="POST",
+                    body=b'{"action":"next"}',
+                    headers=[(b"content-type", b"application/json")],
+                )
             )
-            control = asyncio.run(plugin_api.post_control({"action": "next"}))
-            seek = asyncio.run(plugin_api.post_seek({"position": 22.5}))
+            seek_status, _ = asyncio.run(
+                asgi_request(
+                    app,
+                    "/seek",
+                    method="POST",
+                    body=b'{"position":22.5}',
+                    headers=[(b"content-type", b"application/json")],
+                )
+            )
             refresh = asyncio.run(plugin_api.post_refresh(Response()))
-            permissions = asyncio.run(plugin_api.post_permissions())
-            source = asyncio.run(plugin_api.post_source({"source": "ambient"}))
-            listen = asyncio.run(plugin_api.post_ambient_listen())
-            stop = asyncio.run(plugin_api.post_ambient_stop())
+            permissions = asyncio.run(plugin_api.post_permissions(Response()))
         finally:
             plugin_api._service = previous
 
@@ -228,13 +221,8 @@ class PluginAPITests(unittest.TestCase):
         self.assertEqual(artwork["artwork"]["identity"], identity)
         self.assertEqual(state_response.headers["cache-control"], "private, no-store")
         self.assertEqual(artwork_response.headers["cache-control"], "private, no-store")
-        self.assertEqual(control, {"ok": True})
-        self.assertEqual(seek, {"ok": True})
-        self.assertEqual(refresh, {"ok": True})
-        self.assertEqual(permissions, {"ok": True})
-        self.assertEqual(source, {"ok": True})
-        self.assertEqual(listen, {"ok": True})
-        self.assertEqual(stop, {"ok": True})
+        self.assertEqual([control_status, seek_status], [200, 200])
+        self.assertEqual([refresh, permissions], [{"ok": True}] * 2)
         self.assertEqual(
             fake.calls,
             [
@@ -243,9 +231,6 @@ class PluginAPITests(unittest.TestCase):
                 ("seek", 22.5),
                 ("refresh", None),
                 ("permissions", None),
-                ("source", "ambient"),
-                ("ambient_listen", None),
-                ("ambient_stop", None),
             ],
         )
 
@@ -253,148 +238,33 @@ class PluginAPITests(unittest.TestCase):
         from dashboard import plugin_api
 
         with self.assertRaises(HTTPException) as raised:
-            asyncio.run(
-                plugin_api.get_artwork(Response(), identity="not-a-track-identity")
-            )
-
+            asyncio.run(plugin_api.get_artwork(Response(), identity="not-a-track-identity"))
         self.assertEqual(raised.exception.status_code, 400)
 
-    def test_seek_rejects_integers_too_large_for_a_float(self):
+    def test_seek_rejects_non_numeric_non_finite_and_huge_values(self):
         from dashboard import plugin_api
 
         previous = plugin_api._service
         fake = FakeService()
         plugin_api._service = fake
         try:
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(plugin_api.post_seek({"position": 10**400}))
-        finally:
-            plugin_api._service = previous
-
-        self.assertEqual(raised.exception.status_code, 400)
-        self.assertEqual(raised.exception.detail, "position must be a number")
-        self.assertNotIn(("seek", 10**400), fake.calls)
-
-    def test_source_rejects_unknown_or_non_string_values(self):
-        from dashboard import plugin_api
-
-        previous = plugin_api._service
-        fake = FakeService()
-        plugin_api._service = fake
-        try:
-            for value in (None, True, "nearby"):
+            for value, detail in (
+                (True, "position must be a number"),
+                (False, "position must be a number"),
+                ("1", "position must be a number"),
+                (10**400, "position must be a number"),
+                (float("inf"), "position must be finite"),
+            ):
                 with self.subTest(value=value):
                     with self.assertRaises(HTTPException) as raised:
-                        asyncio.run(plugin_api.post_source({"source": value}))
+                        asyncio.run(plugin_api.post_seek({"position": value}, Response()))
                     self.assertEqual(raised.exception.status_code, 400)
+                    self.assertEqual(raised.exception.detail, detail)
         finally:
             plugin_api._service = previous
-
-        self.assertFalse(any(call[0] == "source" for call in fake.calls))
-
-    def test_source_switch_maps_a_stop_failure_to_service_unavailable(self):
-        from dashboard import plugin_api
-
-        class SourceFailureService(FakeService):
-            def select_source(self, source):
-                raise RuntimeError("private process diagnostics")
-
-        previous = plugin_api._service
-        plugin_api._service = SourceFailureService()
-        try:
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(plugin_api.post_source({"source": "music_app"}))
-        finally:
-            plugin_api._service = previous
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(raised.exception.detail, "unable to switch source safely")
-        self.assertNotIn("private", raised.exception.detail)
-
-    def test_ambient_listen_maps_wrong_source_to_a_conflict(self):
-        from dashboard import plugin_api
-
-        class WrongSourceService(FakeService):
-            def listen_ambient(self):
-                raise ValueError("select Nearby before listening")
-
-        previous = plugin_api._service
-        plugin_api._service = WrongSourceService()
-        try:
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(plugin_api.post_ambient_listen())
-        finally:
-            plugin_api._service = previous
-
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail, "select Nearby before listening")
-
-    def test_ambient_listen_maps_startup_failure_to_service_unavailable(self):
-        from dashboard import plugin_api
-
-        class ListenFailureService(FakeService):
-            def listen_ambient(self):
-                raise RuntimeError("private thread diagnostics")
-
-        previous = plugin_api._service
-        plugin_api._service = ListenFailureService()
-        try:
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(plugin_api.post_ambient_listen())
-        finally:
-            plugin_api._service = previous
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(
-            raised.exception.detail,
-            "recognition could not start",
-        )
-        headers = raised.exception.headers or {}
-        self.assertEqual(headers.get("Cache-Control"), "private, no-store")
-        self.assertEqual(headers.get("Retry-After"), "1")
-        self.assertNotIn("private", raised.exception.detail)
-
-    def test_ambient_stop_maps_an_incomplete_barrier_to_service_unavailable(self):
-        from dashboard import plugin_api
-
-        class StopFailureService(FakeService):
-            def stop_ambient(self):
-                raise RuntimeError("private process diagnostics")
-
-        previous = plugin_api._service
-        plugin_api._service = StopFailureService()
-        try:
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(plugin_api.post_ambient_stop())
-        finally:
-            plugin_api._service = previous
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(raised.exception.detail, "recognition is still stopping")
-        self.assertNotIn("private", raised.exception.detail)
-
-    def test_seek_rejects_json_booleans(self):
-        from dashboard import plugin_api
-
-        previous = plugin_api._service
-        fake = FakeService()
-        plugin_api._service = fake
-        try:
-            for position in (True, False):
-                with self.subTest(position=position):
-                    with self.assertRaises(HTTPException) as raised:
-                        asyncio.run(plugin_api.post_seek({"position": position}))
-                    self.assertEqual(raised.exception.status_code, 400)
-                    self.assertEqual(
-                        raised.exception.detail,
-                        "position must be a number",
-                    )
-        finally:
-            plugin_api._service = previous
-
         self.assertFalse(any(call[0] == "seek" for call in fake.calls))
 
-    def test_unavailable_artwork_is_not_returned_as_a_cacheable_null(self):
+    def test_unavailable_artwork_is_not_returned_as_cacheable_null(self):
         from dashboard import plugin_api
 
         previous = plugin_api._service
@@ -403,19 +273,13 @@ class PluginAPITests(unittest.TestCase):
         plugin_api._service = fake
         try:
             with self.assertRaises(HTTPException) as raised:
-                asyncio.run(
-                    plugin_api.get_artwork(Response(), identity="a" * 24)
-                )
+                asyncio.run(plugin_api.get_artwork(Response(), identity="a" * 24))
         finally:
             plugin_api._service = previous
-
         self.assertEqual(raised.exception.status_code, 404)
-        self.assertEqual(
-            raised.exception.headers,
-            {"Cache-Control": "private, no-store"},
-        )
+        self.assertEqual(raised.exception.headers, {"Cache-Control": "private, no-store"})
 
-    def test_fastapi_request_validation_and_no_store_headers(self):
+    def test_fastapi_validation_and_no_store_headers(self):
         from dashboard import plugin_api
 
         previous = plugin_api._service
@@ -423,25 +287,100 @@ class PluginAPITests(unittest.TestCase):
         app = FastAPI()
         app.include_router(plugin_api.router)
         try:
-            state_status, state_headers = asyncio.run(asgi_get(app, "/state"))
+            state_status, state_headers = asyncio.run(asgi_request(app, "/state"))
             artwork_status, artwork_headers = asyncio.run(
-                asgi_get(app, "/artwork", f"identity={'a' * 24}")
+                asgi_request(app, "/artwork", query_string=f"identity={'a' * 24}")
             )
             invalid_status, invalid_headers = asyncio.run(
-                asgi_get(app, "/artwork", "identity=not-valid")
+                asgi_request(app, "/artwork", query_string="identity=not-valid")
             )
-            missing_status, missing_headers = asyncio.run(asgi_get(app, "/artwork"))
+            missing_status, missing_headers = asyncio.run(asgi_request(app, "/artwork"))
         finally:
             plugin_api._service = previous
 
-        self.assertEqual(state_status, 200)
-        self.assertEqual(artwork_status, 200)
-        self.assertEqual(invalid_status, 400)
-        self.assertEqual(missing_status, 400)
-        self.assertEqual(state_headers["cache-control"], "private, no-store")
-        self.assertEqual(artwork_headers["cache-control"], "private, no-store")
-        self.assertEqual(invalid_headers["cache-control"], "private, no-store")
-        self.assertEqual(missing_headers["cache-control"], "private, no-store")
+        self.assertEqual([state_status, artwork_status, invalid_status, missing_status], [200, 200, 400, 400])
+        for headers in (state_headers, artwork_headers, invalid_headers, missing_headers):
+            self.assertEqual(headers["cache-control"], "private, no-store")
+
+    def test_loopback_guard_rejects_remote_clients_and_ignores_forwarded_headers(self):
+        from dashboard import plugin_api
+
+        previous = plugin_api._service
+        fake = FakeService()
+        plugin_api._service = fake
+        app = FastAPI()
+        app.include_router(plugin_api.router)
+        body = b'{"action":"next"}'
+        try:
+            status, headers = asyncio.run(
+                asgi_request(
+                    app,
+                    "/control",
+                    method="POST",
+                    body=body,
+                    client=("203.0.113.8", 44),
+                    headers=[
+                        (b"content-type", b"application/json"),
+                        (b"host", b"127.0.0.1"),
+                        (b"x-forwarded-for", b"127.0.0.1"),
+                    ],
+                )
+            )
+        finally:
+            plugin_api._service = previous
+        self.assertEqual(status, 403)
+        self.assertEqual(headers["cache-control"], "private, no-store")
+        self.assertEqual(fake.calls, [])
+
+    def test_malformed_control_body_is_rejected_before_parsing_for_remote_clients(self):
+        from dashboard import plugin_api
+
+        previous = plugin_api._service
+        fake = FakeService()
+        plugin_api._service = fake
+        app = FastAPI()
+        app.include_router(plugin_api.router)
+        try:
+            status, headers, response_body = asyncio.run(
+                asgi_request(
+                    app,
+                    "/control",
+                    method="POST",
+                    body=b'{"action":',
+                    client=("203.0.113.8", 44),
+                    headers=[(b"content-type", b"application/json")],
+                    include_body=True,
+                )
+            )
+        finally:
+            plugin_api._service = previous
+
+        self.assertEqual(status, 403)
+        self.assertEqual(headers["cache-control"], "private, no-store")
+        self.assertEqual(response_body, b'{"detail":"local trusted backend required"}')
+        self.assertEqual(fake.calls, [])
+
+    def test_local_malformed_or_non_object_body_has_generic_no_store_validation_error(self):
+        from dashboard import plugin_api
+
+        app = FastAPI()
+        app.include_router(plugin_api.router)
+        for body in (b'{"action":"secret value', b'[]'):
+            with self.subTest(body=body):
+                status, headers, response_body = asyncio.run(
+                    asgi_request(
+                        app,
+                        "/control",
+                        method="POST",
+                        body=body,
+                        headers=[(b"content-type", b"application/json")],
+                        include_body=True,
+                    )
+                )
+                self.assertEqual(status, 422)
+                self.assertEqual(headers["cache-control"], "private, no-store")
+                self.assertEqual(response_body, b'{"detail":"invalid request"}')
+                self.assertNotIn(body, response_body)
 
     def test_state_failures_are_controlled_and_not_cacheable(self):
         from dashboard import plugin_api
@@ -453,10 +392,9 @@ class PluginAPITests(unittest.TestCase):
         app = FastAPI()
         app.include_router(plugin_api.router)
         try:
-            status, headers = asyncio.run(asgi_get(app, "/state"))
+            status, headers = asyncio.run(asgi_request(app, "/state"))
         finally:
             plugin_api._service = previous
-
         self.assertEqual(status, 503)
         self.assertEqual(headers["cache-control"], "private, no-store")
         self.assertEqual(headers["retry-after"], "1")
@@ -475,10 +413,7 @@ class PluginAPITests(unittest.TestCase):
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             loop.set_default_executor(executor)
             try:
-                calls = [
-                    plugin_api.get_artwork(Response(), identity="a" * 24)
-                    for _ in range(8)
-                ]
+                calls = [plugin_api.get_artwork(Response(), identity="a" * 24) for _ in range(8)]
                 return await asyncio.gather(*calls, return_exceptions=True)
             finally:
                 executor.shutdown(wait=True)
@@ -490,35 +425,35 @@ class PluginAPITests(unittest.TestCase):
             outcomes = asyncio.run(exercise())
         finally:
             plugin_api._service = previous
-
         successes = [outcome for outcome in outcomes if isinstance(outcome, dict)]
         failures = [outcome for outcome in outcomes if isinstance(outcome, HTTPException)]
         self.assertEqual(len(successes), 1)
         self.assertEqual([failure.status_code for failure in failures], [503] * 7)
         self.assertEqual(fake.calls, [("artwork", "a" * 24)])
 
-    def test_transient_artwork_failure_is_retryable_and_not_cacheable(self):
+    def test_transient_and_unknown_artwork_failures_are_retryable(self):
         from dashboard import plugin_api
         from dashboard.apple_music_lyrics_backend.service import ArtworkBusyError
 
-        previous = plugin_api._service
-        fake = FakeService()
-        fake.artwork_error = ArtworkBusyError("artwork extraction already in progress")
-        plugin_api._service = fake
-        app = FastAPI()
-        app.include_router(plugin_api.router)
-        try:
-            status, headers = asyncio.run(
-                asgi_get(app, "/artwork", f"identity={'a' * 24}")
-            )
-        finally:
-            plugin_api._service = previous
+        for failure in (ArtworkBusyError("busy"), RuntimeError("unexpected")):
+            with self.subTest(failure=type(failure).__name__):
+                previous = plugin_api._service
+                fake = FakeService()
+                fake.artwork_error = failure
+                plugin_api._service = fake
+                app = FastAPI()
+                app.include_router(plugin_api.router)
+                try:
+                    status, headers = asyncio.run(
+                        asgi_request(app, "/artwork", query_string=f"identity={'a' * 24}")
+                    )
+                finally:
+                    plugin_api._service = previous
+                self.assertEqual(status, 503)
+                self.assertEqual(headers["cache-control"], "private, no-store")
+                self.assertEqual(headers["retry-after"], "1")
 
-        self.assertEqual(status, 503)
-        self.assertEqual(headers["cache-control"], "private, no-store")
-        self.assertEqual(headers["retry-after"], "1")
-
-    def test_busy_refresh_fails_fast_and_is_not_cacheable(self):
+    def test_busy_refresh_fails_fast_and_releases_admission(self):
         from dashboard import plugin_api
         from dashboard.apple_music_lyrics_backend.service import ArtworkBusyError
 
@@ -531,7 +466,6 @@ class PluginAPITests(unittest.TestCase):
                 asyncio.run(plugin_api.post_refresh(Response()))
         finally:
             plugin_api._service = previous
-
         self.assertEqual(raised.exception.status_code, 503)
         self.assertEqual(
             raised.exception.headers,
@@ -552,15 +486,12 @@ class PluginAPITests(unittest.TestCase):
         finally:
             plugin_api._artwork_admission.release()
             plugin_api._service = previous
-
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn(("refresh", None), fake.calls)
 
-    def test_stale_artwork_identity_is_not_cacheable_or_retryable(self):
+    def test_stale_artwork_identity_is_not_retryable(self):
         from dashboard import plugin_api
-        from dashboard.apple_music_lyrics_backend.service import (
-            ArtworkStaleIdentityError,
-        )
+        from dashboard.apple_music_lyrics_backend.service import ArtworkStaleIdentityError
 
         previous = plugin_api._service
         fake = FakeService()
@@ -570,45 +501,39 @@ class PluginAPITests(unittest.TestCase):
         app.include_router(plugin_api.router)
         try:
             status, headers = asyncio.run(
-                asgi_get(app, "/artwork", f"identity={'a' * 24}")
+                asgi_request(app, "/artwork", query_string=f"identity={'a' * 24}")
             )
         finally:
             plugin_api._service = previous
-
         self.assertEqual(status, 409)
         self.assertEqual(headers["cache-control"], "private, no-store")
         self.assertNotIn("retry-after", headers)
 
-    def test_release_version_is_consistent(self):
+    def test_release_version_and_public_metadata_are_consistent(self):
         from dashboard import plugin_api
         from dashboard.apple_music_lyrics_backend.lrclib import CLIENT_HEADER
 
         root = Path(__file__).resolve().parents[1]
-        manifest_version = json.loads(
-            (root / "dashboard" / "manifest.json").read_text(encoding="utf-8")
-        )["version"]
-        project_version = tomllib.loads(
-            (root / "pyproject.toml").read_text(encoding="utf-8")
-        )["project"]["version"]
+        manifest = json.loads((root / "dashboard" / "manifest.json").read_text())
+        project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+        plugin_lines = (root / "plugin.yaml").read_text().splitlines()
         plugin_version = next(
             line.split(":", 1)[1].strip()
-            for line in (root / "plugin.yaml").read_text(encoding="utf-8").splitlines()
+            for line in plugin_lines
             if line.startswith("version:")
         )
-
         self.assertEqual(
-            {manifest_version, project_version, plugin_version, plugin_api.VERSION},
-            {"0.2.0"},
+            {manifest["version"], project["version"], plugin_version, plugin_api.VERSION},
+            {"0.3.0"},
         )
-        self.assertTrue(
-            CLIENT_HEADER.startswith(f"HermesAppleMusicLyrics/{manifest_version} ")
-        )
+        self.assertEqual(project["name"], "hermes-lyrics")
+        self.assertTrue(CLIENT_HEADER.startswith("LyricsForHermes/0.3.0 "))
+        self.assertIn("https://github.com/bondanadnob/hermes-lyrics", CLIENT_HEADER)
 
     def test_real_smoke_script_does_not_emit_personal_track_metadata(self):
         root = Path(__file__).resolve().parents[1]
         script = root / "scripts" / "smoke_test.py"
         source = script.read_text(encoding="utf-8")
-
         for field in ("title", "artist", "album", "duration"):
             self.assertNotIn(f'track.get("{field}")', source)
         self.assertNotIn('lyrics.get("source")', source)
@@ -618,11 +543,7 @@ class PluginAPITests(unittest.TestCase):
         summary = runpy.run_path(str(script))["privacy_safe_summary"](
             {
                 "status": "ready",
-                "track": {
-                    "running": True,
-                    "state": "playing",
-                    "identity": "a" * 24,
-                },
+                "track": {"running": True, "state": "playing", "identity": "a" * 24},
                 "lyrics": {"synced": True, "word_timing": "line"},
                 "artwork": {"remote_url": "https://is1-ssl.mzstatic.com/cover.jpg"},
             }
@@ -639,8 +560,9 @@ class PluginAPITests(unittest.TestCase):
 
     def test_smoke_summary_does_not_report_empty_not_found_lyrics(self):
         root = Path(__file__).resolve().parents[1]
-        script = root / "scripts" / "smoke_test.py"
-        summary = runpy.run_path(str(script))["privacy_safe_summary"](
+        summary = runpy.run_path(str(root / "scripts" / "smoke_test.py"))[
+            "privacy_safe_summary"
+        ](
             {
                 "status": "not_found",
                 "track": {"running": True, "state": "playing"},
@@ -654,7 +576,6 @@ class PluginAPITests(unittest.TestCase):
                 "artwork": {"remote_url": None},
             }
         )
-
         self.assertFalse(summary["lyrics"]["available"])
 
 

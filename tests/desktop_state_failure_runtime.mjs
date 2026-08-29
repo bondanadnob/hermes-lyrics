@@ -10,7 +10,7 @@ import {
 } from '@tanstack/react-query'
 import { __sentinel } from './desktop_plugin_sdk_shim.mjs'
 
-assert.equal(globalThis.__appleMusicLyricsSdkSentinel, __sentinel)
+assert.equal(globalThis.__lyricsForHermesSdkSentinel, __sentinel)
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost/'
@@ -35,13 +35,13 @@ HTMLElement.prototype.scrollIntoView = () => {}
 
 const pluginUrl = pathToFileURL(realpathSync(process.env.PLUGIN_PATH)).href
 const plugin = (await import(pluginUrl)).default
-assert.equal(plugin.id, 'apple-music-lyrics')
+assert.equal(plugin.id, 'lyrics-for-hermes')
 
 let currentState = null
 let failStatePoll = false
 const contributions = []
 const context = {
-  source: 'plugin:apple-music-lyrics',
+  source: 'plugin:lyrics-for-hermes',
   async rest(path) {
     if (path !== '/state') throw new Error(`unexpected REST path: ${path}`)
     if (failStatePoll) throw new Error('503: state polling unavailable')
@@ -62,7 +62,7 @@ assert.equal(typeof page?.render, 'function')
 assert.equal(typeof status?.render, 'function')
 
 const stateQueryKey = [
-  'apple-music-lyrics',
+  'lyrics-for-hermes',
   context.source,
   'default',
   'state'
@@ -138,36 +138,6 @@ async function runRetainedFailureScenario({
   container.remove()
 }
 
-const listeningState = {
-  status: 'listening',
-  track: {
-    album: '',
-    artist: '',
-    can_control: false,
-    can_seek: false,
-    duration: 0,
-    identity: '',
-    position: 0,
-    running: true,
-    sampled_at: Date.now() / 1000,
-    source: 'ambient',
-    state: 'listening',
-    title: ''
-  },
-  lyrics: { lines: [], source: '', synced: false },
-  artwork: { remote_url: null }
-}
-await runRetainedFailureScenario({
-  failureText: 'Microphone status unknown',
-  initialState: listeningState,
-  initialText: 'Microphone active',
-  verifyFailure(text) {
-    assert.ok(occurrences(text, 'Microphone status unknown') >= 2, text)
-    assert.match(text, /Stop listening/)
-    assert.doesNotMatch(text, /Microphone active/)
-  }
-})
-
 const readyState = {
   status: 'ready',
   track: {
@@ -180,7 +150,7 @@ const readyState = {
     position: 10,
     running: true,
     sampled_at: Date.now() / 1000,
-    source: 'ambient',
+    source: 'music_app',
     state: 'playing',
     title: 'stale title'
   },
@@ -202,4 +172,4 @@ await runRetainedFailureScenario({
 })
 
 dom.window.close()
-console.log(JSON.stringify({ passed: true, scenarios: 2 }))
+console.log(JSON.stringify({ passed: true, scenarios: 1 }))

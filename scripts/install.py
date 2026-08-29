@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Install the unified plugin and recognition runtime into the local Hermes home."""
+"""Transactionally install Lyrics for Hermes into the selected Hermes profile."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
-PLUGIN_ID = "apple-music-lyrics"
+PLUGIN_ID = "lyrics-for-hermes"
+LEGACY_PLUGIN_ID = "apple-music-lyrics"
 ROOT = Path(__file__).resolve().parents[1]
-RECOGNITION_LOCK = ROOT / "requirements-recognition.lock"
 
 
 def remove_target(path: Path) -> None:
@@ -23,34 +25,41 @@ def remove_target(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _profile_home_from_cli(hermes: str, *, environment: dict[str, str] | None = None) -> Path | None:
+    try:
+        completed = subprocess.run(
+            [hermes, "config", "path"],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or not value:
+        return None
+    config_path = Path(value).expanduser()
+    if not config_path.is_absolute() or config_path.name != "config.yaml":
+        return None
+    return config_path.parent.resolve()
+
+
 def resolve_hermes_home() -> Path:
     configured = os.environ.get("HERMES_HOME")
     if configured is not None and configured.strip():
-        return Path(configured).expanduser()
+        return Path(configured).expanduser().resolve()
 
     hermes = shutil.which("hermes")
     if hermes:
-        try:
-            completed = subprocess.run(
-                [hermes, "config", "path"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            config_path = Path(completed.stdout.strip()).expanduser()
-            if (
-                completed.returncode == 0
-                and config_path.is_absolute()
-                and config_path.name == "config.yaml"
-            ):
-                return config_path.parent
-        except (OSError, subprocess.SubprocessError):
-            pass
+        active_home = _profile_home_from_cli(hermes)
+        if active_home is not None:
+            return active_home
 
-    return Path.home() / ".hermes"
+    return (Path.home() / ".hermes").resolve()
 
 
 class _PreparedTarget:
@@ -71,15 +80,13 @@ class _PreparedTarget:
         source: Path,
         target: Path,
         staging_root: Path,
-        staged: Path,
-        backup: Path,
         target_existed: bool,
     ) -> None:
         self.source = source
         self.target = target
         self.staging_root = staging_root
-        self.staged = staged
-        self.backup = backup
+        self.staged = staging_root / "payload"
+        self.backup = staging_root / "previous"
         self.target_existed = target_existed
         self.backed_up = False
         self.committed = False
@@ -95,29 +102,6 @@ class _PreparedRemoval:
         self.backed_up = False
 
 
-def _validate_target(source: Path, target: Path, force: bool) -> bool:
-    if not source.is_dir():
-        raise RuntimeError(f"source directory does not exist: {source}")
-    if target.is_symlink() and target.resolve() == source.resolve():
-        print(f"Already linked: {target}")
-        return False
-    source_resolved = source.resolve()
-    target_resolved = target.resolve()
-    if (
-        source_resolved == target_resolved
-        or target_resolved.is_relative_to(source_resolved)
-        or source_resolved.is_relative_to(target_resolved)
-    ):
-        raise RuntimeError(
-            f"source and target directories overlap: {source} -> {target}; "
-            "choose a HERMES_HOME outside the checkout"
-        )
-    target_exists = target.exists() or target.is_symlink()
-    if target_exists and not force:
-        raise RuntimeError(f"{target} already exists; rerun with --force to replace it")
-    return True
-
-
 def _paths_overlap(first: Path, second: Path) -> bool:
     first_resolved = first.resolve()
     second_resolved = second.resolve()
@@ -128,18 +112,78 @@ def _paths_overlap(first: Path, second: Path) -> bool:
     )
 
 
-def _validate_recognition_target(
-    recognition_target: Path,
-    targets: list[tuple[Path, Path]],
+def _lexical_paths_overlap(first: Path, second: Path) -> bool:
+    first_absolute = Path(os.path.abspath(first))
+    second_absolute = Path(os.path.abspath(second))
+    return (
+        first_absolute == second_absolute
+        or first_absolute.is_relative_to(second_absolute)
+        or second_absolute.is_relative_to(first_absolute)
+    )
+
+
+def _validate_target(source: Path, target: Path, force: bool) -> bool:
+    if not source.is_dir():
+        raise RuntimeError(f"source directory does not exist: {source}")
+    if target.is_symlink() and target.resolve() == source.resolve():
+        print(f"Already linked: {target}")
+        return False
+    if _paths_overlap(source, target):
+        raise RuntimeError(
+            f"source and target directories overlap: {source} -> {target}; "
+            "choose a HERMES_HOME outside the checkout"
+        )
+    if (target.exists() or target.is_symlink()) and not force:
+        raise RuntimeError(f"{target} already exists; rerun with --force to replace it")
+    return True
+
+
+def _validate_obsolete_targets(
+    obsolete_targets: list[Path], targets: list[tuple[Path, Path]]
 ) -> None:
-    for source, plugin_target in targets:
-        if _paths_overlap(recognition_target, source) or _paths_overlap(
-            recognition_target, plugin_target
-        ):
+    seen: set[Path] = set()
+    for obsolete in obsolete_targets:
+        absolute = Path(os.path.abspath(obsolete))
+        if absolute in seen:
+            raise RuntimeError(f"duplicate legacy target: {obsolete}")
+        seen.add(absolute)
+        for source, target in targets:
+            if _lexical_paths_overlap(obsolete, source) or _lexical_paths_overlap(
+                obsolete, target
+            ):
+                raise RuntimeError(
+                    f"legacy target overlaps a plugin source or target: {obsolete}"
+                )
+
+
+def _validate_profile_target_ancestors(
+    hermes_home: Path,
+    targets: list[Path],
+) -> None:
+    """Reject target parents that escape the selected profile through symlinks."""
+    profile_absolute = Path(os.path.abspath(hermes_home))
+    profile_root = hermes_home.resolve()
+    for target in targets:
+        absolute = Path(os.path.abspath(target))
+        try:
+            relative = absolute.relative_to(profile_absolute)
+        except ValueError as exc:
             raise RuntimeError(
-                "recognition runtime target overlaps a plugin source or target: "
-                f"{recognition_target}"
-            )
+                f"plugin target escapes the selected Hermes profile: {target}"
+            ) from exc
+        current = profile_root
+        for part in relative.parts[:-1]:
+            current /= part
+            if current.is_symlink():
+                raise RuntimeError(
+                    f"plugin target has a symlinked profile ancestor: {current}"
+                )
+        try:
+            absolute.parent.resolve().relative_to(profile_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"plugin target parent escapes the selected Hermes profile: {target}"
+            ) from exc
 
 
 def _cleanup_prepared(prepared: list[_PreparedTarget]) -> None:
@@ -162,11 +206,11 @@ def _restore_removals(removals: list[_PreparedRemoval]) -> Exception | None:
         try:
             if plan.target.exists() or plan.target.is_symlink():
                 raise RuntimeError(
-                    f"cannot restore obsolete plugin path because it reappeared: {plan.target}"
+                    f"cannot restore legacy plugin path because it reappeared: {plan.target}"
                 )
             plan.backup.rename(plan.target)
             plan.backed_up = False
-        except Exception as exc:
+        except Exception as exc:  # preserve recovery evidence when rollback itself fails
             rollback_error = rollback_error or exc
     return rollback_error
 
@@ -177,6 +221,7 @@ def _quarantine_obsolete_targets(targets: list[Path]) -> list[_PreparedRemoval]:
         for target in targets:
             if not (target.exists() or target.is_symlink()):
                 continue
+            target.parent.mkdir(parents=True, exist_ok=True)
             staging_root = Path(
                 tempfile.mkdtemp(prefix=f".{target.name}.remove-", dir=target.parent)
             )
@@ -189,7 +234,7 @@ def _quarantine_obsolete_targets(targets: list[Path]) -> list[_PreparedRemoval]:
         _cleanup_removals(removals)
         if rollback_error is not None:
             raise RuntimeError(
-                f"could not quarantine obsolete plugin paths and rollback was incomplete: "
+                "could not quarantine legacy plugin paths and rollback was incomplete: "
                 f"{rollback_error}"
             ) from quarantine_error
         raise
@@ -221,8 +266,6 @@ def _prepare_targets(
                 source=source,
                 target=target,
                 staging_root=staging_root,
-                staged=staging_root / "payload",
-                backup=staging_root / "previous",
                 target_existed=target.exists() or target.is_symlink(),
             )
             prepared.append(plan)
@@ -233,7 +276,14 @@ def _prepare_targets(
                     source,
                     plan.staged,
                     ignore=shutil.ignore_patterns(
-                        ".git", ".venv", "__pycache__", ".DS_Store", "*.egg-info"
+                        ".git",
+                        ".venv",
+                        ".ruff_cache",
+                        "build",
+                        "node_modules",
+                        "__pycache__",
+                        ".DS_Store",
+                        "*.egg-info",
                     ),
                 )
     except Exception:
@@ -260,7 +310,7 @@ def _commit_prepared(prepared: list[_PreparedTarget]) -> None:
                 if plan.backed_up and (plan.backup.exists() or plan.backup.is_symlink()):
                     plan.backup.rename(plan.target)
                     plan.backed_up = False
-            except Exception as exc:  # preserve backups for manual recovery
+            except Exception as exc:  # preserve recovery evidence when rollback itself fails
                 rollback_error = rollback_error or exc
         if rollback_error is not None:
             raise RuntimeError(
@@ -268,7 +318,27 @@ def _commit_prepared(prepared: list[_PreparedTarget]) -> None:
             ) from commit_error
         raise
 
-    for plan in prepared:
+
+def _rollback_bundle(
+    prepared: list[_PreparedTarget], removals: list[_PreparedRemoval]
+) -> Exception | None:
+    rollback_error: Exception | None = None
+    for plan in reversed(prepared):
+        try:
+            if plan.committed and (plan.target.exists() or plan.target.is_symlink()):
+                remove_target(plan.target)
+                plan.committed = False
+            if plan.backed_up and (plan.backup.exists() or plan.backup.is_symlink()):
+                plan.backup.rename(plan.target)
+                plan.backed_up = False
+        except Exception as exc:  # preserve recovery evidence when rollback itself fails
+            rollback_error = rollback_error or exc
+    removal_error = _restore_removals(removals)
+    return rollback_error or removal_error
+
+
+def _discard_backups(prepared: list[_PreparedTarget], removals: list[_PreparedRemoval]) -> None:
+    for plan in [*prepared, *removals]:
         if plan.backup.exists() or plan.backup.is_symlink():
             try:
                 remove_target(plan.backup)
@@ -277,150 +347,21 @@ def _commit_prepared(prepared: list[_PreparedTarget]) -> None:
                 print(f"warning: could not remove installer backup: {exc}", file=sys.stderr)
 
 
-def install_targets(
-    targets: list[tuple[Path, Path]], link: bool, force: bool
-) -> None:
-    prepared: list[_PreparedTarget] = []
-    try:
-        prepared = _prepare_targets(targets, link=link, force=force)
-        _commit_prepared(prepared)
-    finally:
-        _cleanup_prepared(prepared)
-
-    for plan in prepared:
-        if link:
-            print(f"Linked {plan.target} -> {plan.source}")
-        else:
-            print(f"Copied {plan.source} -> {plan.target}")
-
-
-def install_target(source: Path, target: Path, link: bool, force: bool) -> None:
-    install_targets([(source, target)], link=link, force=force)
-
-
-def _runtime_subprocess_env(staging_root: Path) -> dict[str, str]:
-    home = staging_root / "home"
-    temp = staging_root / "tmp"
-    home.mkdir()
-    temp.mkdir()
-    return {
-        "HOME": str(home),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C",
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        "PYTHONNOUSERSITE": "1",
-        "TMPDIR": str(temp),
-    }
-
-
-def _require_recognition_lock() -> None:
-    if RECOGNITION_LOCK.is_symlink() or not RECOGNITION_LOCK.is_file():
-        raise RuntimeError(f"recognition dependency lock is missing: {RECOGNITION_LOCK}")
-
-
-def install_recognition_runtime(
-    target: Path,
-    *,
-    python_executable: Path = Path(sys.executable),
-    runner=subprocess.run,
-) -> None:
-    _require_recognition_lock()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = Path(
-        tempfile.mkdtemp(prefix=f".{target.name}.install-", dir=target.parent)
-    )
-    staged = staging_root / "venv"
-    backup = staging_root / "previous"
-    environment = _runtime_subprocess_env(staging_root)
-    backed_up = False
-    try:
-        commands = [
-            [str(python_executable), "-m", "venv", str(staged)],
-            [
-                str(staged / "bin" / "python"),
-                "-I",
-                "-m",
-                "pip",
-                "--isolated",
-                "install",
-                "--disable-pip-version-check",
-                "--no-cache-dir",
-                "--no-input",
-                "--index-url",
-                "https://pypi.org/simple",
-                "--require-hashes",
-                "--only-binary=:all:",
-                "-r",
-                str(RECOGNITION_LOCK),
-            ],
-            [
-                str(staged / "bin" / "python"),
-                "-I",
-                "-c",
-                (
-                    "from importlib import metadata, util; "
-                    "assert metadata.version('shazamio') == '0.8.1'; "
-                    "assert metadata.version('shazamio-core') == '1.1.2'; "
-                    "assert util.find_spec('shazamio') is not None; "
-                    "assert util.find_spec('shazamio_core') is not None; "
-                    "print('shazamio')"
-                ),
-            ],
-            [
-                str(staged / "bin" / "python"),
-                "-I",
-                "-m",
-                "pip",
-                "check",
-            ],
-        ]
-        for command in commands:
-            completed = runner(
-                command,
-                check=False,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError("could not install the ambient recognition runtime")
-        if target.exists() or target.is_symlink():
-            target.rename(backup)
-            backed_up = True
-        try:
-            staged.rename(target)
-        except Exception:
-            if backed_up and (backup.exists() or backup.is_symlink()):
-                backup.rename(target)
-                backed_up = False
-            raise
-        if backup.exists() or backup.is_symlink():
-            remove_target(backup)
-            backed_up = False
-    finally:
-        if not backed_up:
-            shutil.rmtree(staging_root, ignore_errors=True)
-
-
 def install_bundle(
     targets: list[tuple[Path, Path]],
-    recognition_target: Path,
     *,
     link: bool,
     force: bool,
     obsolete_targets: list[Path] | None = None,
+    activate: Callable[[], object] | None = None,
 ) -> None:
-    _require_recognition_lock()
-    _validate_recognition_target(recognition_target, targets)
+    obsolete = obsolete_targets or []
+    _validate_obsolete_targets(obsolete, targets)
     installable = [
         (source, target)
         for source, target in targets
         if _validate_target(source, target, force)
     ]
-    runtime_existed = recognition_target.exists() or recognition_target.is_symlink()
-    if runtime_existed and not force:
-        raise RuntimeError(
-            f"{recognition_target} already exists; rerun with --force to replace it"
-        )
 
     prepared: list[_PreparedTarget] = []
     removals: list[_PreparedRemoval] = []
@@ -431,104 +372,170 @@ def install_bundle(
             force=force,
             validated=True,
         )
-        recognition_target.parent.mkdir(parents=True, exist_ok=True)
-        runtime_staging_root = Path(
-            tempfile.mkdtemp(
-                prefix=f".{recognition_target.name}.install-",
-                dir=recognition_target.parent,
-            )
-        )
-        runtime_plan = _PreparedTarget(
-            source=RECOGNITION_LOCK,
-            target=recognition_target,
-            staging_root=runtime_staging_root,
-            staged=runtime_staging_root / "payload",
-            backup=runtime_staging_root / "previous",
-            target_existed=runtime_existed,
-        )
-        prepared.append(runtime_plan)
-        install_recognition_runtime(runtime_plan.staged)
-        removals = _quarantine_obsolete_targets(obsolete_targets or [])
+        removals = _quarantine_obsolete_targets(obsolete)
         try:
             _commit_prepared(prepared)
         except Exception as commit_error:
             rollback_error = _restore_removals(removals)
             if rollback_error is not None:
                 raise RuntimeError(
-                    "installation failed and obsolete-plugin rollback was incomplete: "
+                    "installation failed and legacy-path rollback was incomplete: "
                     f"{rollback_error}"
                 ) from commit_error
             raise
-        for plan in removals:
-            if plan.backup.exists() or plan.backup.is_symlink():
-                try:
-                    remove_target(plan.backup)
-                    plan.backed_up = False
-                except OSError as exc:
-                    print(
-                        f"warning: could not remove obsolete plugin backup: {exc}",
-                        file=sys.stderr,
-                    )
+        if activate is not None:
+            try:
+                activate()
+            except Exception as activation_error:
+                rollback_error = _rollback_bundle(prepared, removals)
+                if rollback_error is not None:
+                    raise RuntimeError(
+                        "activation failed and filesystem rollback was incomplete: "
+                        f"{rollback_error}"
+                    ) from activation_error
+                raise
+        _discard_backups(prepared, removals)
     finally:
         _cleanup_prepared(prepared)
         _cleanup_removals(removals)
 
-    for plan in prepared[:-1]:
+    for plan in prepared:
         if link:
             print(f"Linked {plan.target} -> {plan.source}")
         else:
             print(f"Copied {plan.source} -> {plan.target}")
-    print(f"Installed recognition runtime -> {recognition_target}")
+
+
+def install_target(source: Path, target: Path, link: bool, force: bool) -> None:
+    install_bundle([(source, target)], link=link, force=force)
+
+
+def _enabled_plugins(hermes: str, environment: dict[str, str]) -> list[str]:
+    completed = subprocess.run(
+        [hermes, "config", "get", "--json", "plugins.enabled"],
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("could not read enabled-plugin configuration")
+    try:
+        value = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("enabled-plugin configuration is invalid") from exc
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise RuntimeError("enabled-plugin configuration is invalid")
+    return value
+
+
+def _set_enabled_plugins(
+    hermes: str,
+    environment: dict[str, str],
+    enabled: list[str],
+) -> bool:
+    payload = json.dumps(enabled, separators=(",", ":"))
+    completed = subprocess.run(
+        [hermes, "config", "set", "plugins.enabled", payload],
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _activate_plugin(hermes: str, hermes_home: Path) -> int:
+    environment = os.environ.copy()
+    environment["HERMES_HOME"] = str(hermes_home)
+    active_home = _profile_home_from_cli(hermes, environment=environment)
+    if active_home is None or active_home != hermes_home.resolve():
+        raise RuntimeError(
+            "Hermes active profile does not match the installed filesystem target"
+        )
+
+    previous = _enabled_plugins(hermes, environment)
+    updated = [item for item in previous if item != LEGACY_PLUGIN_ID]
+    if PLUGIN_ID not in updated:
+        updated.append(PLUGIN_ID)
+    if updated == previous:
+        return 0
+
+    if not _set_enabled_plugins(hermes, environment, updated):
+        if not _set_enabled_plugins(hermes, environment, previous):
+            raise RuntimeError("enabled-plugin update failed and rollback was incomplete")
+        raise RuntimeError("enabled-plugin update failed")
+    try:
+        verified = _enabled_plugins(hermes, environment)
+    except RuntimeError as exc:
+        if not _set_enabled_plugins(hermes, environment, previous):
+            raise RuntimeError(
+                "enabled-plugin verification failed and rollback was incomplete"
+            ) from exc
+        raise RuntimeError("enabled-plugin verification failed") from exc
+    if verified != updated:
+        if not _set_enabled_plugins(hermes, environment, previous):
+            raise RuntimeError("enabled-plugin verification failed and rollback was incomplete")
+        raise RuntimeError("enabled-plugin verification failed")
+    return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--link", action="store_true", help="symlink for local development")
     parser.add_argument("--force", action="store_true", help="replace an existing installation")
-    parser.add_argument("--no-enable", action="store_true", help="do not enable the backend")
+    parser.add_argument("--no-enable", action="store_true", help="do not change backend enablement")
     args = parser.parse_args()
 
     hermes_home = resolve_hermes_home()
-    backend_target = hermes_home / "plugins" / PLUGIN_ID
-    desktop_target = hermes_home / "desktop-plugins" / PLUGIN_ID
-    recognition_target = (
-        hermes_home / "plugin-data" / PLUGIN_ID / "recognition-venv"
-    )
+    plugin_target = hermes_home / "plugins" / PLUGIN_ID
+    legacy_targets = [
+        hermes_home / "plugins" / LEGACY_PLUGIN_ID,
+        hermes_home / "desktop-plugins" / LEGACY_PLUGIN_ID,
+        hermes_home / "plugin-data" / LEGACY_PLUGIN_ID,
+    ]
 
     try:
-        targets = [(ROOT, backend_target)]
+        _validate_profile_target_ancestors(
+            hermes_home,
+            [plugin_target, *legacy_targets],
+        )
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    hermes = None if args.no_enable else shutil.which("hermes")
+    if hermes:
+        active_home = _profile_home_from_cli(hermes, environment={**os.environ, "HERMES_HOME": str(hermes_home)})
+        if active_home is None or active_home != hermes_home.resolve():
+            print(
+                "error: Hermes active profile does not match the installed filesystem target",
+                file=sys.stderr,
+            )
+            return 2
+
+    try:
         install_bundle(
-            targets,
-            recognition_target,
+            [(ROOT, plugin_target)],
             link=args.link,
             force=args.force,
-            obsolete_targets=[desktop_target],
+            obsolete_targets=legacy_targets,
+            activate=(lambda: _activate_plugin(hermes, hermes_home)) if hermes else None,
         )
     except (OSError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if not args.no_enable:
-        hermes = shutil.which("hermes")
-        if hermes:
-            completed = subprocess.run(
-                [
-                    hermes,
-                    "plugins",
-                    "enable",
-                    "--no-allow-tool-override",
-                    PLUGIN_ID,
-                ],
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                print("warning: plugin files installed, but backend enable failed", file=sys.stderr)
-                return completed.returncode
-        else:
-            print("warning: `hermes` not found; enable the backend manually", file=sys.stderr)
+    if not args.no_enable and not hermes:
+        print("warning: `hermes` not found; enable the backend manually", file=sys.stderr)
 
-    print("Installed Apple Music Lyrics. Restart Hermes Desktop and its local server.")
+    print("Installed Lyrics for Hermes. Restart Hermes Desktop and its local server.")
     return 0
 
 

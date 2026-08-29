@@ -912,11 +912,15 @@ class MusicClientTests(unittest.TestCase):
             runner=lambda script: scripts.append(script) or ProcessResult(0, "ok", "")
         )
 
+        client.control("play")
+        client.control("pause")
         client.control("next")
         client.seek(95.5)
 
-        self.assertIn("nextTrack", scripts[0])
-        self.assertIn("95.5", scripts[1])
+        self.assertIn("music.play()", scripts[0])
+        self.assertIn("music.pause()", scripts[1])
+        self.assertIn("nextTrack", scripts[2])
+        self.assertIn("95.5", scripts[3])
         with self.assertRaises(ValueError):
             client.control("delete everything")
         with self.assertRaises(ValueError):
