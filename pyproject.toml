@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-apple-music-lyrics"
-version = "0.2.0"
-description = "Synchronized Apple Music lyrics for Hermes Desktop"
+name = "hermes-lyrics"
+version = "0.3.0"
+description = "Lyrics for Music.app in Hermes Desktop"
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.115"]
+dependencies = ["fastapi==0.141.1"]
 license = "MIT"
 license-files = ["LICENSE"]
 
@@ -15,8 +15,7 @@ license-files = ["LICENSE"]
 dev = ["ruff>=0.9"]
 
 [project.urls]
-Repository = "https://github.com/bondanadnob/hermes-apple-music-lyrics"
-Issues = "https://github.com/bondanadnob/hermes-apple-music-lyrics/issues"
+Repository = "https://github.com/bondanadnob/hermes-lyrics"
 
 [tool.setuptools]
 packages = ["dashboard", "dashboard.apple_music_lyrics_backend"]

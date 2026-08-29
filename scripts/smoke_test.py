@@ -11,9 +11,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from dashboard.apple_music_lyrics_backend.apple_cache import (  # noqa: E402
-    AppleMusicCacheProvider,
-)
 from dashboard.apple_music_lyrics_backend.lrclib import LRCLIBProvider  # noqa: E402
 from dashboard.apple_music_lyrics_backend.music import MusicClient  # noqa: E402
 from dashboard.apple_music_lyrics_backend.service import LyricsService  # noqa: E402
@@ -49,11 +46,9 @@ def privacy_safe_summary(state: dict) -> dict:
 
 
 def main() -> int:
-    apple_cache = AppleMusicCacheProvider()
     state = LyricsService(
         music=MusicClient(),
-        providers=(apple_cache, LRCLIBProvider()),
-        artwork_provider=apple_cache,
+        providers=(LRCLIBProvider(),),
     ).state()
     print(json.dumps(privacy_safe_summary(state), indent=2, ensure_ascii=False))
     return 1 if state.get("status") in {"error", "permission_required"} else 0

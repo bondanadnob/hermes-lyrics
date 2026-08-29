@@ -365,6 +365,79 @@ class LRCLIBProviderTests(unittest.TestCase):
         self.assertIsNone(document)
         self.assertTrue(any("/search?" in url for url in calls))
 
+    def test_retry_after_header_is_case_insensitive_and_uses_monotonic_cooldown(self):
+        calls = []
+        now = [10.0]
+
+        def fetch(url, _headers, _timeout):
+            calls.append(url)
+            return HTTPResponse(429, "", {"rEtRy-AfTeR": "7"})
+
+        provider = LRCLIBProvider(fetcher=fetch, monotonic_clock=lambda: now[0])
+        track = TrackInfo(
+            True,
+            "playing",
+            "Song",
+            "Artist",
+            persistent_id="a" * 24,
+        )
+
+        self.assertIsNone(provider.lyrics_for(track))
+        self.assertEqual(len(calls), 1)
+        now[0] = 16.99
+        self.assertIsNone(provider.lyrics_for(track))
+        self.assertEqual(len(calls), 1)
+        now[0] = 17.0
+        self.assertIsNone(provider.lyrics_for(track))
+        self.assertEqual(len(calls), 2)
+
+    def test_retry_after_above_limit_is_capped_at_five_minutes(self):
+        calls = []
+        now = [100.0]
+
+        def fetch(url, _headers, _timeout):
+            calls.append(url)
+            return HTTPResponse(429, "", {"Retry-After": "999"})
+
+        provider = LRCLIBProvider(fetcher=fetch, monotonic_clock=lambda: now[0])
+        track = TrackInfo(True, "playing", "Song", "Artist")
+
+        self.assertIsNone(provider.lyrics_for(track))
+        self.assertEqual(len(calls), 1)
+        now[0] = 399.99
+        self.assertIsNone(provider.lyrics_for(track))
+        self.assertEqual(len(calls), 1)
+        now[0] = 400.0
+        self.assertIsNone(provider.lyrics_for(track))
+        self.assertEqual(len(calls), 2)
+
+    def test_missing_or_invalid_retry_after_uses_safe_default(self):
+        for headers in (
+            None,
+            {},
+            {"Retry-After": ""},
+            {"Retry-After": "date"},
+            {"Retry-After": "0"},
+            {"Retry-After": "9" * 5000},
+        ):
+            with self.subTest(headers=headers):
+                calls = []
+                now = [50.0]
+
+                def fetch(url, _headers, _timeout):
+                    calls.append(url)
+                    return HTTPResponse(429, "", headers)
+
+                provider = LRCLIBProvider(fetcher=fetch, monotonic_clock=lambda: now[0])
+                track = TrackInfo(True, "playing", "Song", "Artist")
+                self.assertIsNone(provider.lyrics_for(track))
+                now[0] = 79.99
+                self.assertIsNone(provider.lyrics_for(track))
+                self.assertEqual(len(calls), 1)
+                now[0] = 80.0
+                self.assertIsNone(provider.lyrics_for(track))
+                self.assertEqual(len(calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

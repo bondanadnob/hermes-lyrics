@@ -522,6 +522,8 @@ def _valid_png(data: bytes) -> bool:
 
 
 _CONTROL_SCRIPTS = {
+    "play": 'const music = Application("Music"); music.play(); "ok";',
+    "pause": 'const music = Application("Music"); music.pause(); "ok";',
     "play_pause": 'const music = Application("Music"); music.playpause(); "ok";',
     "next": 'const music = Application("Music"); music.nextTrack(); "ok";',
     "previous": 'const music = Application("Music"); music.previousTrack(); "ok";',

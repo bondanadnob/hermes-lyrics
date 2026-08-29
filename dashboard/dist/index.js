@@ -9,9 +9,9 @@
     return sdk.React.createElement(
       "div",
       { className: "max-w-lg p-6 text-sm text-muted-foreground" },
-      "Apple Music Lyrics is available in Hermes Desktop on the local Mac."
+      "Lyrics for Hermes is available in Hermes Desktop on the local Mac."
     );
   }
 
-  registry.register("apple-music-lyrics", DesktopOnlyNotice);
+  registry.register("lyrics-for-hermes", DesktopOnlyNotice);
 })();

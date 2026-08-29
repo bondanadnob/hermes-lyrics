@@ -10,15 +10,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dashboard.plugin_api import router
 
 EXPECTED_ROUTES = {
-    "/ambient/listen",
-    "/ambient/stop",
     "/artwork",
     "/control",
     "/health",
     "/permissions",
     "/refresh",
     "/seek",
-    "/source",
     "/state",
 }
 
@@ -31,7 +28,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         body = json.dumps(
             {
                 "ok": True,
-                "plugin": "apple-music-lyrics",
+                "plugin": "lyrics-for-hermes",
                 "routes": sorted(EXPECTED_ROUTES),
             }
         ).encode("utf-8")

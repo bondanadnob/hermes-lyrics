@@ -1,4 +1,0 @@
-# Intentional roots for the isolated Nearby recognition runtime.
-pip==26.1.2
-setuptools==83.0.0
-shazamio==0.8.1

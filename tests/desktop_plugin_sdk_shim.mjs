@@ -1,4 +1,3 @@
-import { createElement } from 'react'
 import {
   useMutation,
   useQuery,
@@ -6,7 +5,7 @@ import {
 } from '@tanstack/react-query'
 
 export const __sentinel = {}
-globalThis.__appleMusicLyricsSdkSentinel = __sentinel
+globalThis.__lyricsForHermesSdkSentinel = __sentinel
 
 const profile = { get: () => 'default' }
 export const host = {
@@ -26,10 +25,5 @@ export const STATUSBAR_AREAS = {
 }
 export const cn = (...values) => values.filter(Boolean).join(' ')
 export const haptic = () => {}
-export const SegmentedControl = props =>
-  createElement('div', {
-    'data-source': props.value,
-    'data-testid': 'source-switcher'
-  })
 export { useMutation, useQuery, useQueryClient }
 export const useValue = atom => atom.get()

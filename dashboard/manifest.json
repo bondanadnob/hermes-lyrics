@@ -1,8 +1,8 @@
 {
-  "name": "apple-music-lyrics",
-  "label": "Apple Music Lyrics",
-  "version": "0.2.0",
-  "description": "Synchronized Apple Music lyrics in a dockable Hermes pane.",
+  "name": "lyrics-for-hermes",
+  "label": "Lyrics for Hermes",
+  "version": "0.3.0",
+  "description": "Lyrics for Music.app in a dockable Hermes pane.",
   "icon": "Music",
   "tab": {
     "hidden": true

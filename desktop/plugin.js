@@ -4,7 +4,6 @@ import {
   ROUTES_AREA,
   SIDEBAR_NAV_AREA,
   STATUSBAR_AREAS,
-  SegmentedControl,
   cn,
   haptic,
   host,
@@ -16,9 +15,9 @@ import {
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-const ID = 'apple-music-lyrics'
-const ROUTE = '/apple-music-lyrics'
-const PROFILE_CHANGED_ERROR = 'Active Hermes profile changed during Apple Music request'
+const ID = 'lyrics-for-hermes'
+const ROUTE = '/lyrics-for-hermes'
+const PROFILE_CHANGED_ERROR = 'Active Hermes profile changed during Lyrics for Hermes request'
 
 const queryKey = (ctx, profile) => [ID, ctx.source, profile || 'default', 'state']
 const artworkProfileQueryKey = (ctx, profile) => [
@@ -101,7 +100,7 @@ function useMusicArtwork(ctx, profile, identity, enabled) {
         !artwork.data_url.startsWith('data:image/') ||
         safeArtworkUrl(artwork.data_url) !== artwork.data_url
       ) {
-        throw new Error('Invalid artwork response from Apple Music Lyrics backend')
+        throw new Error('Invalid artwork response from Lyrics for Hermes backend')
       }
       return artwork
     },
@@ -151,18 +150,6 @@ function ActionButton({ label, children, disabled, onClick }) {
     ),
     style: { minWidth: '2rem' },
     children
-  })
-}
-
-function SourceSwitcher({ disabled, onChange, source }) {
-  return jsx(SegmentedControl, {
-    disabled,
-    onChange,
-    options: [
-      { id: 'music_app', label: 'Music.app' },
-      { id: 'ambient', label: 'Nearby' }
-    ],
-    value: source === 'ambient' ? 'ambient' : 'music_app'
   })
 }
 
@@ -275,7 +262,7 @@ function SourcePill({ lyrics }) {
   })
 }
 
-function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, onSourceChange, position, refresh, runAction, runSeek, source, track, working }) {
+function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, position, refresh, runAction, runSeek, track, working }) {
   const percentage = track.duration
     ? clamp((position / track.duration) * 100, 0, 100)
     : 0
@@ -307,14 +294,6 @@ function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, onSourceChange
   return jsxs('div', {
     className: 'shrink-0 border-b border-(--ui-stroke-secondary) p-3',
     children: [
-      jsx('div', {
-        className: 'mb-3 flex justify-center',
-        children: jsx(SourceSwitcher, {
-          disabled: working,
-          onChange: onSourceChange,
-          source
-        })
-      }),
       jsxs('div', {
         className: 'flex min-w-0 items-center gap-3',
         children: [
@@ -328,7 +307,7 @@ function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, onSourceChange
                   compact ? 'text-sm' : 'text-base'
                 ),
                 title: track.title,
-                children: track.title || 'Apple Music'
+                children: track.title || 'Music.app'
               }),
               jsx('div', {
                 className: 'mt-0.5 truncate text-xs text-(--ui-text-secondary)',
@@ -357,7 +336,8 @@ function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, onSourceChange
             jsx(ActionButton, {
               label: track.state === 'playing' ? 'Pause' : 'Play',
               disabled: working,
-              onClick: () => runAction('play_pause'),
+              onClick: () =>
+                runAction(track.state === 'playing' ? 'pause' : 'play'),
               children: track.state === 'playing' ? '❚❚' : '▶'
             }),
           canControl &&
@@ -379,7 +359,7 @@ function PlayerHeader({ artworkUrl, fallbackUrl, compact, lyrics, onSourceChange
         jsx('div', {
           role: canSeek ? 'slider' : 'progressbar',
         tabIndex: canSeek && track.duration && !working ? 0 : -1,
-        'aria-label': canSeek ? 'Seek in current track' : 'Estimated nearby playback position',
+        'aria-label': canSeek ? 'Seek in current track' : 'Current track progress',
         'aria-disabled': !canSeek || !track.duration || working,
         'aria-valuemin': 0,
         'aria-valuemax': Math.round(Number(track.duration) || 0),
@@ -558,62 +538,12 @@ const MemoizedLyricsScroller = memo(
     previous.working === next.working
 )
 
-function StateNotice({ listen, onSourceChange, status, stop, refresh, openPermissions, source, working }) {
+function StateNotice({ status, refresh, openPermissions, working }) {
   const common = 'flex h-full flex-col items-center justify-center gap-3 p-6 text-center'
-  const sourceSwitcher = jsx(SourceSwitcher, {
-    disabled: working,
-    onChange: onSourceChange,
-    source
-  })
-  if (status === 'listening') {
-    return jsxs('div', {
-      className: common,
-      children: [
-        sourceSwitcher,
-        jsx('div', {
-          className: 'animate-pulse text-2xl text-(--ui-accent)',
-          children: '●'
-        }),
-        jsx('div', { className: 'font-medium', children: 'Microphone active' }),
-        jsx('button', {
-          type: 'button',
-          disabled: working,
-          onClick: stop,
-          className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm hover:bg-(--chrome-action-hover)',
-          children: 'Stop listening'
-        })
-      ]
-    })
-  }
-  if (status === 'listening_unknown') {
-    return jsxs('div', {
-      className: common,
-      children: [
-        sourceSwitcher,
-        jsx('div', {
-          className: 'text-2xl text-(--ui-text-tertiary)',
-          children: '◌'
-        }),
-        jsx('div', { className: 'font-medium', children: 'Microphone status unknown' }),
-        jsx('p', {
-          className: 'max-w-sm text-sm text-(--ui-text-tertiary)',
-          children: 'Hermes could not refresh the listening state. Stop remains available until the backend confirms capture ended.'
-        }),
-        jsx('button', {
-          type: 'button',
-          disabled: working,
-          onClick: stop,
-          className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm hover:bg-(--chrome-action-hover)',
-          children: 'Stop listening'
-        })
-      ]
-    })
-  }
   if (status === 'state_unknown') {
     return jsxs('div', {
       className: common,
       children: [
-        sourceSwitcher,
         jsx('div', { className: 'text-2xl text-(--ui-text-tertiary)', children: '◌' }),
         jsx('div', { className: 'font-medium', children: 'Music status unknown' }),
         jsx('p', {
@@ -623,42 +553,10 @@ function StateNotice({ listen, onSourceChange, status, stop, refresh, openPermis
       ]
     })
   }
-  if (['ambient_idle', 'no_match', 'recognition_error'].includes(status)) {
-    const heading =
-      status === 'no_match'
-        ? 'No nearby song recognized'
-        : status === 'recognition_error'
-          ? 'Recognition unavailable'
-          : 'Identify nearby music'
-    return jsxs('div', {
-      className: common,
-      children: [
-        sourceSwitcher,
-        jsx('div', { className: 'text-3xl text-(--ui-text-quaternary)', children: '◉' }),
-        jsx('div', { className: 'font-medium', children: heading }),
-        jsx('p', {
-          className: 'max-w-sm text-sm text-(--ui-text-tertiary)',
-          children: "Experimental · Unofficial Shazam fingerprint service. An 8-second sample is fingerprinted on this Mac; the fingerprint, request metadata and your IP address reach Shazam. If a song matches, track metadata is sent to LRCLIB for lyrics. Showing recognized artwork contacts Apple's mzstatic.com CDN, which receives the image request and your IP address. Audio is not saved."
-        }),
-        jsx('button', {
-          type: 'button',
-          disabled: working,
-          onClick: listen,
-          className: cn(
-            'rounded-md bg-(--ui-accent) px-3 py-1.5 text-sm',
-            'disabled:pointer-events-none disabled:opacity-40'
-          ),
-          style: { color: 'var(--ui-bg-primary)' },
-          children: 'Listen for 8 seconds'
-        })
-      ]
-    })
-  }
   if (status === 'permission_required') {
     return jsxs('div', {
       className: common,
       children: [
-        sourceSwitcher,
         jsx('div', { className: 'text-2xl', children: '♫' }),
         jsx('div', { className: 'font-medium', children: 'Allow Music access' }),
         jsx('p', {
@@ -683,9 +581,8 @@ function StateNotice({ listen, onSourceChange, status, stop, refresh, openPermis
     return jsxs('div', {
       className: common,
       children: [
-        sourceSwitcher,
         jsx('div', { className: 'text-3xl text-(--ui-text-quaternary)', children: '♪' }),
-        jsx('div', { className: 'font-medium', children: 'Play something in Apple Music' }),
+        jsx('div', { className: 'font-medium', children: 'Play something in Music.app' }),
         jsx('p', {
           className: 'text-sm text-(--ui-text-tertiary)',
           children: 'The lyrics pane will wake up automatically.'
@@ -697,21 +594,17 @@ function StateNotice({ listen, onSourceChange, status, stop, refresh, openPermis
     return jsxs('div', {
       className: common,
       children: [
-        sourceSwitcher,
         jsx('div', { className: 'font-medium', children: 'No lyrics found' }),
         jsx('p', {
           className: 'max-w-sm text-sm text-(--ui-text-tertiary)',
-          children:
-            source === 'ambient'
-              ? 'Song identified, but no synchronized lyrics were found. Try listening again.'
-              : 'Try opening Lyrics once in Music.app so its local cache can populate, then refresh.'
+          children: 'No synchronized lyrics matched this track. Music.app plain lyrics are shown when available.'
         }),
         jsx('button', {
           type: 'button',
           disabled: working,
-          onClick: source === 'ambient' ? listen : refresh,
+          onClick: refresh,
           className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm hover:bg-(--chrome-action-hover)',
-          children: source === 'ambient' ? 'Listen again' : 'Refresh lyrics'
+          children: 'Refresh lyrics'
         })
       ]
     })
@@ -719,11 +612,10 @@ function StateNotice({ listen, onSourceChange, status, stop, refresh, openPermis
   return jsxs('div', {
     className: common,
     children: [
-      sourceSwitcher,
       jsx('div', { className: 'font-medium', children: 'Lyrics backend unavailable' }),
       jsx('p', {
         className: 'text-sm text-(--ui-text-tertiary)',
-        children: 'Enable the apple-music-lyrics backend and restart the local Hermes server.'
+        children: 'Enable the lyrics-for-hermes backend and restart the local Hermes server.'
       })
     ]
   })
@@ -735,7 +627,6 @@ function MusicExperience({ ctx, compact = false }) {
   const queryClient = useQueryClient()
   const retainedData = query.data
   const data = query.isError ? undefined : retainedData
-  const ambientArtwork = data?.track?.source === 'ambient'
   const cachedArtworkUrl = useMemo(
     () => safeArtworkUrl(data?.artwork?.remote_url),
     [data?.artwork?.remote_url]
@@ -745,17 +636,15 @@ function MusicExperience({ ctx, compact = false }) {
     ctx,
     profile,
     artworkIdentity,
-    Boolean(data?.track?.title && data?.track?.source !== 'ambient')
+    Boolean(data?.track?.title)
   )
   const localArtworkUrl = useMemo(
     () => safeArtworkUrl(artworkQuery.data?.data_url),
     [artworkQuery.data?.data_url]
   )
   const artworkSources = useMemo(
-    () =>
-      ambientArtwork ? { url: cachedArtworkUrl, fallbackUrl: null } : selectArtworkSources(artworkQuery, cachedArtworkUrl, localArtworkUrl),
+    () => selectArtworkSources(artworkQuery, cachedArtworkUrl, localArtworkUrl),
     [
-      ambientArtwork,
       artworkQuery.data?.data_url,
       artworkQuery.error,
       artworkQuery.isError,
@@ -767,9 +656,6 @@ function MusicExperience({ ctx, compact = false }) {
   const artworkUrl = artworkSources.url
   const artworkFallbackUrl = artworkSources.fallbackUrl
   const position = useInterpolatedPosition(data?.track)
-  const selectedSource = data?.track?.source === 'ambient' ? 'ambient' : 'music_app'
-  const lastKnownSource =
-    retainedData?.track?.source === 'ambient' ? 'ambient' : 'music_app'
 
   const command = useMutation({
     mutationFn: async input => {
@@ -787,7 +673,7 @@ function MusicExperience({ ctx, compact = false }) {
     },
     onError: error => {
       if (error?.message !== PROFILE_CHANGED_ERROR) {
-        host.notifyError(error, 'Apple Music command failed')
+        host.notifyError(error, 'Music.app command failed')
       }
     }
   })
@@ -818,19 +704,6 @@ function MusicExperience({ ctx, compact = false }) {
     haptic('tap')
     command.mutate({ path: '/permissions', body: {} })
   }
-  const selectSource = nextSource => {
-    haptic('tap')
-    command.mutate({ path: '/source', body: { source: nextSource } })
-  }
-  const listenAmbient = () => {
-    haptic('tap')
-    command.mutate({ path: '/ambient/listen', body: {} })
-  }
-  const stopAmbient = () => {
-    haptic('tap')
-    command.mutate({ path: '/ambient/stop', body: {} })
-  }
-
   if (query.isLoading) {
     return jsxs('div', {
       className: 'flex h-full items-center justify-center gap-2 text-sm text-(--ui-text-tertiary)',
@@ -842,17 +715,9 @@ function MusicExperience({ ctx, compact = false }) {
   }
   if (query.isError) {
     return jsx(StateNotice, {
-      stop: stopAmbient,
-      onSourceChange: selectSource,
-      status:
-        retainedData?.status === 'listening'
-          ? 'listening_unknown'
-          : retainedData
-            ? 'state_unknown'
-            : 'error',
+      status: retainedData ? 'state_unknown' : 'error',
       refresh,
       openPermissions,
-      source: lastKnownSource,
       working: command.isPending
     })
   }
@@ -861,21 +726,13 @@ function MusicExperience({ ctx, compact = false }) {
     [
       'idle',
       'permission_required',
-      'error',
-      'ambient_idle',
-      'listening',
-      'no_match',
-      'recognition_error'
+      'error'
     ].includes(data.status)
   ) {
     return jsx(StateNotice, {
-      listen: listenAmbient,
-      onSourceChange: selectSource,
       status: data?.status || 'error',
-      stop: stopAmbient,
       refresh,
       openPermissions,
-      source: selectedSource,
       working: command.isPending
     })
   }
@@ -892,23 +749,18 @@ function MusicExperience({ ctx, compact = false }) {
         fallbackUrl: artworkFallbackUrl,
         compact,
         lyrics: data.lyrics,
-        onSourceChange: selectSource,
         position,
         refresh,
         runAction,
         runSeek,
-        source: selectedSource,
         track: data.track,
         working: command.isPending
       }),
       data.status === 'not_found'
         ? jsx(StateNotice, {
-            listen: listenAmbient,
-            onSourceChange: selectSource,
             status: 'not_found',
             refresh,
             openPermissions,
-            source: selectedSource,
             working: command.isPending
           })
         : jsx(MemoizedLyricsScroller, {
@@ -935,17 +787,13 @@ function StatusChip({ ctx }) {
   const line = activeLineFor(data, position)
   const text =
     query.isError
-      ? retainedData?.status === 'listening'
-        ? 'Microphone status unknown'
-        : 'Music status unknown'
-      : data?.status === 'listening'
-        ? 'Microphone active'
-        : line?.text?.trim() || data?.track?.title || 'Apple Music'
+      ? 'Music status unknown'
+      : line?.text?.trim() || data?.track?.title || 'Music.app'
   const label = text.length > 34 ? `${text.slice(0, 33)}…` : text
 
   return jsx('button', {
     type: 'button',
-    title: 'Open Apple Music Lyrics',
+    title: 'Open Lyrics for Hermes',
     onClick: () => {
       haptic('tap')
       host.navigate(ROUTE)
@@ -961,8 +809,8 @@ function StatusChip({ ctx }) {
 
 export default {
   id: ID,
-  name: 'Apple Music Lyrics',
-  description: 'Synchronized lyrics for Music.app and manually recognized Nearby music',
+  name: 'Lyrics for Hermes',
+  description: 'Synchronized lyrics and playback controls for Music.app',
   register(ctx) {
     ctx.registerMany([
       {
@@ -997,8 +845,8 @@ export default {
         id: 'open',
         area: PALETTE_AREA,
         data: {
-          id: 'apple-music-lyrics.open',
-          label: 'Open Apple Music Lyrics',
+          id: 'lyrics-for-hermes.open',
+          label: 'Open Lyrics for Hermes',
           keywords: ['apple', 'music', 'lyrics', 'karaoke'],
           run: () => host.navigate(ROUTE)
         }

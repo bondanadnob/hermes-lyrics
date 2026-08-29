@@ -1,6 +1,6 @@
-name: apple-music-lyrics
-version: 0.2.0
-description: Synchronized Apple Music lyrics for Hermes Desktop
+name: lyrics-for-hermes
+version: 0.3.0
+description: Lyrics for Music.app in Hermes Desktop
 author: bondanadnob
 module: __init__.py
 requires: []

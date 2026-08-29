@@ -1,8 +1,8 @@
 {
-  "name": "hermes-apple-music-lyrics-tests",
-  "version": "0.2.0",
+  "name": "hermes-lyrics-tests",
+  "version": "0.3.0",
   "private": true,
-  "description": "Self-contained desktop runtime test harness for Hermes Apple Music Lyrics",
+  "description": "Self-contained desktop runtime test harness for Lyrics for Hermes",
   "scripts": {
     "test:syntax": "node --check desktop/plugin.js && node --check dashboard/dist/index.js && node --check tests/desktop_artwork_runtime.mjs && node --check tests/desktop_plugin_loader.mjs && node --check tests/desktop_plugin_sdk_shim.mjs && node --check tests/desktop_state_failure_runtime.mjs && node --check tests/register_desktop_plugin_loader.mjs",
     "test:artwork": "node tests/desktop_artwork_runtime.mjs",

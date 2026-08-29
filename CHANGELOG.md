@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.0] - 2026-08-30
+
+### Removed
+
+- Removed the unsupported private Apple lyric-cache provider and its TTML parser.
+- Removed all microphone, ambient-recognition, unofficial Shazam-compatible endpoint, FFmpeg, and isolated recognition-runtime code.
+- The unreleased TTML spacing hotfix is superseded by removal of that unsupported provider.
+
+### Changed
+
+- Rebranded the public project and plugin as **Lyrics for Hermes** with the new `lyrics-for-hermes` plugin ID; `apple-music-lyrics` remains only as a legacy migration key.
+- Added a loopback-only route guard because Hermes plugin routes are otherwise unauthenticated.
+- Added bounded, nonblocking LRCLIB `Retry-After` cooldown handling.
+- Updated vulnerable Python build/runtime tool pins and regenerated the SHA-256 lock.
+- Added deterministic CycloneDX dependency and license evidence.
+- Added transactional, profile-scoped migration and expanded privacy, rights, permission, and non-affiliation disclosures.
+
 ## [0.2.0] - 2026-08-23
 
 ### Added

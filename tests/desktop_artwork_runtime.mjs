@@ -17,7 +17,6 @@ const sandbox = {
   ROUTES_AREA: 'routes',
   SIDEBAR_NAV_AREA: 'sidebar',
   STATUSBAR_AREAS: { right: 'status-right' },
-  SegmentedControl: props => ({ type: 'SegmentedControl', props }),
   cn: (...values) => values.filter(Boolean).join(' '),
   haptic: () => {},
   host: {
@@ -122,7 +121,7 @@ assert.equal(artworkRetry(1, new Error('503: transient')), true)
 assert.equal(artworkRetry(2, new Error('503: still unavailable')), false)
 assert.equal(artworkRetry(0, new Error('404: absent')), false)
 assert.equal(artworkRetry(0, new Error('409: stale')), false)
-assert.equal(artworkRetry(0, new Error('Active Hermes profile changed during Apple Music request')), false)
+assert.equal(artworkRetry(0, new Error('Active Hermes profile changed during Lyrics for Hermes request')), false)
 
 const wrapped503 = new Error("Error invoking remote method 'hermes:api': Error: 503: busy")
 const wrapped409 = new Error(
@@ -218,11 +217,11 @@ assert.ok(refreshHeader)
 refreshHeader.props.refresh()
 assert.equal(typeof refreshRemoveFilter?.predicate, 'function')
 assert.equal(
-  refreshRemoveFilter.predicate({ queryKey: ['apple-music-lyrics', 'local', 'default', 'artwork', identity] }),
+  refreshRemoveFilter.predicate({ queryKey: ['lyrics-for-hermes', 'local', 'default', 'artwork', identity] }),
   false
 )
 assert.equal(
-  refreshRemoveFilter.predicate({ queryKey: ['apple-music-lyrics', 'local', 'default', 'artwork', 'b'.repeat(24)] }),
+  refreshRemoveFilter.predicate({ queryKey: ['lyrics-for-hermes', 'local', 'default', 'artwork', 'b'.repeat(24)] }),
   true
 )
 assert.equal(currentArtworkRefetches, 1)
@@ -298,60 +297,12 @@ assert.doesNotMatch(JSON.stringify(staleArtworkTree), /data:image\/jpeg|mzstatic
 
 sandbox.useMemo = factory => factory()
 sandbox.useValue = () => 'default'
-const listeningState = {
-  status: 'listening',
-  track: {
-    running: true,
-    state: 'listening',
-    title: '',
-    artist: '',
-    album: '',
-    duration: 0,
-    position: 0,
-    sampled_at: Date.now() / 1000,
-    identity: '',
-    source: 'ambient',
-    can_control: false,
-    can_seek: false
-  },
-  lyrics: { source: '', synced: false, lines: [] },
-  artwork: { remote_url: null }
-}
 let staleArtworkEnabled = null
-sandbox.useQuery = options => {
-  if (options.queryKey.at(-1) === 'state') {
-    return { data: listeningState, isLoading: false, isError: true, refetch: async () => {} }
-  }
-  staleArtworkEnabled = options.enabled
-  return {
-    data: undefined,
-    isSuccess: false,
-    isError: false,
-    refetch: async () => {}
-  }
-}
 sandbox.useQueryClient = () => ({ invalidateQueries: () => {}, removeQueries: () => {} })
 sandbox.useMutation = () => ({ mutate: () => {}, isPending: false })
 sandbox.jsx = (type, props) =>
   typeof type === 'function' ? type(props || {}) : { type, props: props || {} }
 sandbox.jsxs = sandbox.jsx
-const retainedListeningTree = MusicExperience({
-  ctx: { source: 'local', rest: async () => ({}) },
-  compact: false
-})
-const retainedListeningText = JSON.stringify(retainedListeningTree)
-assert.match(retainedListeningText, /Microphone status unknown/)
-assert.match(retainedListeningText, /Stop listening/)
-assert.doesNotMatch(retainedListeningText, /Microphone active/)
-assert.doesNotMatch(retainedListeningText, /Lyrics backend unavailable/)
-assert.equal(staleArtworkEnabled, false)
-const retainedStatusText = JSON.stringify(StatusChip({
-  ctx: { source: 'local', rest: async () => ({}) }
-}))
-assert.match(retainedStatusText, /Microphone status unknown/)
-assert.doesNotMatch(retainedStatusText, /Microphone active/)
-
-staleArtworkEnabled = null
 sandbox.useQuery = options => {
   if (options.queryKey.at(-1) === 'state') {
     return { data: staleState, isLoading: false, isError: true, refetch: async () => {} }
