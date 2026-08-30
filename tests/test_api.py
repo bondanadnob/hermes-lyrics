@@ -174,7 +174,7 @@ class PluginAPITests(unittest.TestCase):
 
         response = Response()
         health = asyncio.run(plugin_api.get_health(response))
-        self.assertEqual(health["version"], "0.3.0")
+        self.assertEqual(health["version"], "0.3.1")
         self.assertEqual(response.headers["cache-control"], "private, no-store")
         self.assertEqual(health["providers"], ["Music.app", "LRCLIB"])
         self.assertFalse(health["microphone"])
@@ -524,10 +524,10 @@ class PluginAPITests(unittest.TestCase):
         )
         self.assertEqual(
             {manifest["version"], project["version"], plugin_version, plugin_api.VERSION},
-            {"0.3.0"},
+            {"0.3.1"},
         )
         self.assertEqual(project["name"], "hermes-lyrics")
-        self.assertTrue(CLIENT_HEADER.startswith("LyricsForHermes/0.3.0 "))
+        self.assertTrue(CLIENT_HEADER.startswith("LyricsForHermes/0.3.1 "))
         self.assertIn("https://github.com/bondanadnob/hermes-lyrics", CLIENT_HEADER)
 
     def test_real_smoke_script_does_not_emit_personal_track_metadata(self):

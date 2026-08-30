@@ -1,4 +1,4 @@
-"""Public-distribution hardening contracts for version 0.3.0."""
+"""Public-distribution hardening contracts for version 0.3.1."""
 
 import asyncio
 import unittest
@@ -96,7 +96,7 @@ class HardeningContracts(unittest.TestCase):
     def test_release_display_name_and_canonical_id_are_stable(self):
         from dashboard import plugin_api
 
-        self.assertEqual(plugin_api.VERSION, "0.3.0")
+        self.assertEqual(plugin_api.VERSION, "0.3.1")
         self.assertEqual(plugin_api.PLUGIN_ID, "lyrics-for-hermes")
         self.assertEqual(plugin_api.DISPLAY_NAME, "Lyrics for Hermes")
 

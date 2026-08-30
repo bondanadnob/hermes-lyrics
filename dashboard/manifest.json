@@ -1,7 +1,7 @@
 {
   "name": "lyrics-for-hermes",
   "label": "Lyrics for Hermes",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Lyrics for Music.app in a dockable Hermes pane.",
   "icon": "Music",
   "tab": {

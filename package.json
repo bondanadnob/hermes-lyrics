@@ -1,6 +1,6 @@
 {
   "name": "hermes-lyrics-tests",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Self-contained desktop runtime test harness for Lyrics for Hermes",
   "scripts": {

@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,7 +94,7 @@ class InstallerTests(unittest.TestCase):
             target = root / "target"
             write_marker(source, "new")
             write_marker(target, "old")
-            with patch.object(installer.shutil, "copytree", side_effect=OSError("copy failed")):
+            with patch.object(installer, "_copy_source_tree", side_effect=OSError("copy failed")):
                 with self.assertRaisesRegex(OSError, "copy failed"):
                     installer.install_target(source, target, link=False, force=True)
             self.assertEqual((target / "marker.txt").read_text(encoding="utf-8"), "old")
@@ -104,15 +105,347 @@ class InstallerTests(unittest.TestCase):
             source = root / "source"
             target = root / "target"
             write_marker(source, "payload")
-            for name in (".git", ".venv", ".ruff_cache", "build", "node_modules", "sample.egg-info"):
+            excluded = (
+                ".git",
+                ".venv",
+                ".audit-venv",
+                ".hermes",
+                ".mypy_cache",
+                ".nox",
+                ".pytest_cache",
+                ".ruff_cache",
+                ".tox",
+                "build",
+                "node_modules",
+                "sample.egg-info",
+                "venv-ci",
+            )
+            for name in excluded:
                 write_marker(source / name, name)
+            write_marker(source / "custom-environment", "virtualenv")
+            (source / "custom-environment" / "pyvenv.cfg").write_text(
+                "home = /usr/bin", encoding="utf-8"
+            )
             write_marker(source / "dashboard" / "dist", "desktop bundle")
 
             installer.install_target(source, target, link=False, force=False)
 
-            for name in (".git", ".venv", ".ruff_cache", "build", "node_modules", "sample.egg-info"):
+            for name in (*excluded, "custom-environment"):
                 self.assertFalse((target / name).exists(), name)
             self.assertEqual((target / "dashboard" / "dist" / "marker.txt").read_text(), "desktop bundle")
+
+    def test_copy_install_ignores_symlinks_inside_node_modules(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, target, external = root / "source", root / "target", root / "external"
+            write_marker(source, "payload")
+            write_marker(external, "outside")
+            (source / "node_modules").mkdir()
+            (source / "node_modules" / "external").symlink_to(external, target_is_directory=True)
+
+            installer.install_target(source, target, link=False, force=False)
+
+            self.assertEqual((target / "marker.txt").read_text(), "payload")
+            self.assertFalse((target / "node_modules").exists())
+
+    def test_copy_install_excludes_dot_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source, target = Path(temp) / "source", Path(temp) / "target"
+            write_marker(source, "payload")
+            write_marker(source / ".cache", "must-not-ship")
+
+            installer.install_target(source, target, link=False, force=False)
+
+            self.assertFalse((target / ".cache").exists())
+
+    def test_copy_install_refuses_file_swapped_to_external_symlink_during_open(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, target, external = root / "source", root / "target", root / "external.txt"
+            write_marker(source, "new")
+            (source / "payload.txt").write_text("reviewed", encoding="utf-8")
+            write_marker(target, "old")
+            external.write_text("external bytes", encoding="utf-8")
+            real_open = installer.os.open
+            swapped = False
+
+            def swap_before_open(name, flags, *args, **kwargs):
+                nonlocal swapped
+                if name == "payload.txt" and not swapped:
+                    swapped = True
+                    (source / "payload.txt").unlink()
+                    (source / "payload.txt").symlink_to(external)
+                return real_open(name, flags, *args, **kwargs)
+
+            with patch.object(installer.os, "open", side_effect=swap_before_open):
+                with self.assertRaisesRegex(RuntimeError, "unsafe source entry"):
+                    installer.install_target(source, target, link=False, force=True)
+
+            self.assertEqual((target / "marker.txt").read_text(), "old")
+            self.assertFalse((target / "payload.txt").exists())
+
+    def test_main_never_mutates_profile_b_when_plugins_is_swapped_after_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, profile_a, profile_b = root / "source", root / "profiles" / "a", root / "profiles" / "b"
+            write_marker(source, "new")
+            write_marker(profile_a / "plugins" / installer.LEGACY_PLUGIN_ID, "a")
+            write_marker(profile_b / "plugins" / installer.LEGACY_PLUGIN_ID, "b")
+            real_validate = installer._validate_profile_target_ancestors
+
+            def validate_then_swap(*args, **kwargs):
+                real_validate(*args, **kwargs)
+                shutil.rmtree(profile_a / "plugins")
+                (profile_a / "plugins").symlink_to(profile_b / "plugins", target_is_directory=True)
+
+            with (
+                patch.object(installer, "ROOT", source),
+                patch.object(installer.sys, "argv", ["install.py", "--no-enable", "--force"]),
+                patch.object(installer, "resolve_hermes_home", return_value=profile_a),
+                patch.object(installer, "_validate_profile_target_ancestors", side_effect=validate_then_swap),
+                patch("builtins.print"),
+            ):
+                result = installer.main()
+
+            self.assertEqual(result, 2)
+            self.assertEqual((profile_b / "plugins" / installer.LEGACY_PLUGIN_ID / "marker.txt").read_text(), "b")
+            self.assertFalse((profile_b / "plugins" / installer.PLUGIN_ID).exists())
+
+    def test_profile_directory_swap_after_final_validation_cannot_mutate_profile_b(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile_a = root / "profiles" / "a"
+            profile_b = root / "profiles" / "b"
+            write_marker(source, "new")
+            write_marker(profile_a / "plugins" / installer.LEGACY_PLUGIN_ID, "a")
+            write_marker(profile_b / "plugins" / installer.LEGACY_PLUGIN_ID, "b")
+            real_validate = installer._validate_profile_target_ancestors
+            validations = 0
+
+            def swap_after_final_validation(*args, **kwargs):
+                nonlocal validations
+                real_validate(*args, **kwargs)
+                validations += 1
+                if validations == 2:
+                    shutil.rmtree(profile_a / "plugins")
+                    (profile_a / "plugins").symlink_to(
+                        profile_b / "plugins", target_is_directory=True
+                    )
+
+            with (
+                patch.object(installer, "ROOT", source),
+                patch.object(installer.sys, "argv", ["install.py", "--no-enable", "--force"]),
+                patch.object(installer, "resolve_hermes_home", return_value=profile_a),
+                patch.object(
+                    installer,
+                    "_validate_profile_target_ancestors",
+                    side_effect=swap_after_final_validation,
+                ),
+                patch("builtins.print"),
+            ):
+                result = installer.main()
+
+            self.assertEqual(result, 2)
+            self.assertEqual(
+                (profile_b / "plugins" / installer.LEGACY_PLUGIN_ID / "marker.txt").read_text(),
+                "b",
+            )
+            self.assertFalse((profile_b / "plugins" / installer.PLUGIN_ID).exists())
+
+    def test_anchored_profile_copy_migrates_canonical_and_all_legacy_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile = root / "profile"
+            write_marker(source, "new")
+            write_marker(profile / "plugins" / installer.PLUGIN_ID, "old")
+            legacy = [
+                profile / "plugins" / installer.LEGACY_PLUGIN_ID,
+                profile / "desktop-plugins" / installer.LEGACY_PLUGIN_ID,
+                profile / "plugin-data" / installer.LEGACY_PLUGIN_ID,
+            ]
+            for index, path in enumerate(legacy):
+                write_marker(path, f"legacy-{index}")
+
+            installer.install_profile_bundle(
+                source,
+                profile,
+                link=False,
+                force=True,
+            )
+
+            self.assertEqual(
+                (profile / "plugins" / installer.PLUGIN_ID / "marker.txt").read_text(),
+                "new",
+            )
+            self.assertTrue(all(not path.exists() for path in legacy))
+
+    def test_anchored_profile_activation_failure_restores_all_paths(self):
+        for link in (False, True):
+            with self.subTest(link=link), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / "source"
+                profile = root / "profile"
+                write_marker(source, "new")
+                canonical = profile / "plugins" / installer.PLUGIN_ID
+                write_marker(canonical, "old")
+                legacy = [
+                    profile / "plugins" / installer.LEGACY_PLUGIN_ID,
+                    profile / "desktop-plugins" / installer.LEGACY_PLUGIN_ID,
+                    profile / "plugin-data" / installer.LEGACY_PLUGIN_ID,
+                ]
+                for index, path in enumerate(legacy):
+                    write_marker(path, f"legacy-{index}")
+
+                with self.assertRaisesRegex(RuntimeError, "enable failed"):
+                    installer.install_profile_bundle(
+                        source,
+                        profile,
+                        link=link,
+                        force=True,
+                        activate=lambda: (_ for _ in ()).throw(RuntimeError("enable failed")),
+                    )
+
+                self.assertEqual((canonical / "marker.txt").read_text(), "old")
+                for index, path in enumerate(legacy):
+                    self.assertEqual((path / "marker.txt").read_text(), f"legacy-{index}")
+
+    def test_profile_swap_after_descriptors_open_never_mutates_profile_b(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile_a = root / "profiles" / "a"
+            profile_b = root / "profiles" / "b"
+            write_marker(source, "new")
+            write_marker(profile_a / "plugins" / installer.LEGACY_PLUGIN_ID, "a")
+            write_marker(profile_b / "plugins" / installer.LEGACY_PLUGIN_ID, "b")
+            real_assert = installer._assert_profile_anchor
+            assertions = 0
+
+            def swap_after_open(home_fd, name, directory_fd):
+                nonlocal assertions
+                assertions += 1
+                if assertions == 4:
+                    shutil.rmtree(profile_a / "plugins")
+                    (profile_a / "plugins").symlink_to(
+                        profile_b / "plugins", target_is_directory=True
+                    )
+                return real_assert(home_fd, name, directory_fd)
+
+            with patch.object(
+                installer,
+                "_assert_profile_anchor",
+                side_effect=swap_after_open,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "profile directory changed"):
+                    installer.install_profile_bundle(
+                        source,
+                        profile_a,
+                        link=False,
+                        force=True,
+                    )
+
+            self.assertEqual(
+                (profile_b / "plugins" / installer.LEGACY_PLUGIN_ID / "marker.txt").read_text(),
+                "b",
+            )
+            self.assertFalse((profile_b / "plugins" / installer.PLUGIN_ID).exists())
+
+    def test_profile_swap_during_activation_rolls_back_enablement_and_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            profile_a = root / "profiles" / "a"
+            profile_b = root / "profiles" / "b"
+            detached_plugins = profile_a / "plugins-detached"
+            write_marker(source, "new")
+            write_marker(profile_a / "plugins" / installer.PLUGIN_ID, "old")
+            write_marker(profile_b / "plugins" / installer.LEGACY_PLUGIN_ID, "b")
+            activation_events = []
+
+            def activate_then_swap():
+                activation_events.append("enabled")
+                (profile_a / "plugins").rename(detached_plugins)
+                (profile_a / "plugins").symlink_to(
+                    profile_b / "plugins", target_is_directory=True
+                )
+
+                def rollback_activation():
+                    activation_events.append("restored")
+
+                return rollback_activation
+
+            with self.assertRaisesRegex(RuntimeError, "profile directory changed"):
+                installer.install_profile_bundle(
+                    source,
+                    profile_a,
+                    link=False,
+                    force=True,
+                    activate=activate_then_swap,
+                )
+
+            self.assertEqual(activation_events, ["enabled", "restored"])
+            self.assertEqual(
+                (detached_plugins / installer.PLUGIN_ID / "marker.txt").read_text(),
+                "old",
+            )
+            self.assertEqual(
+                (profile_b / "plugins" / installer.LEGACY_PLUGIN_ID / "marker.txt").read_text(),
+                "b",
+            )
+            self.assertFalse((profile_b / "plugins" / installer.PLUGIN_ID).exists())
+
+    def test_copy_install_rejects_source_symlinks_before_replacing_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            target = root / "target"
+            external = root / "external"
+            write_marker(source, "new")
+            write_marker(target, "old")
+            write_marker(external, "outside")
+            (source / "dashboard").mkdir()
+            (source / "dashboard" / "external-link").symlink_to(
+                external, target_is_directory=True
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "unsafe source entry"):
+                installer.install_target(source, target, link=False, force=True)
+
+            self.assertEqual((target / "marker.txt").read_text(encoding="utf-8"), "old")
+            self.assertEqual((external / "marker.txt").read_text(encoding="utf-8"), "outside")
+
+    def test_copy_install_rejects_symlink_inserted_during_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            target = root / "target"
+            external = root / "external"
+            write_marker(source, "new")
+            write_marker(target, "old")
+            write_marker(external, "outside")
+            (source / "dashboard").mkdir()
+            real_open = installer.os.open
+            injected = False
+
+            def inject_symlink_during_copy(name, flags, *args, **kwargs):
+                nonlocal injected
+                if not injected and name == "late-link":
+                    injected = True
+                    (source / "dashboard" / "late-link").unlink()
+                    (source / "dashboard" / "late-link").symlink_to(
+                        external, target_is_directory=True
+                    )
+                return real_open(name, flags, *args, **kwargs)
+
+            (source / "dashboard" / "late-link").write_text("reviewed", encoding="utf-8")
+            with patch.object(installer.os, "open", side_effect=inject_symlink_during_copy):
+                with self.assertRaisesRegex(RuntimeError, "unsafe source entry"):
+                    installer.install_target(source, target, link=False, force=True)
+
+            self.assertEqual((target / "marker.txt").read_text(encoding="utf-8"), "old")
+            self.assertEqual((external / "marker.txt").read_text(encoding="utf-8"), "outside")
 
     def test_pair_staging_failure_preserves_both_existing_targets(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -126,14 +459,14 @@ class InstallerTests(unittest.TestCase):
                 (second_target, "old-b"),
             ):
                 write_marker(path, value)
-            real_copytree = installer.shutil.copytree
+            real_copy = installer._copy_source_tree
 
             def fail_second(source, *args, **kwargs):
-                if Path(source) == second_source:
+                if source == second_source:
                     raise OSError("second staging failed")
-                return real_copytree(source, *args, **kwargs)
+                return real_copy(source, *args, **kwargs)
 
-            with patch.object(installer.shutil, "copytree", side_effect=fail_second):
+            with patch.object(installer, "_copy_source_tree", side_effect=fail_second):
                 with self.assertRaisesRegex(OSError, "second staging failed"):
                     installer.install_bundle(
                         [(first_source, first_target), (second_source, second_target)],
@@ -386,32 +719,25 @@ class InstallerTests(unittest.TestCase):
             source.mkdir()
             captured = {}
 
-            def capture(targets, **options):
-                captured["targets"] = targets
+            def capture(source_path, profile_path, **options):
+                captured["source"] = source_path
+                captured["profile"] = profile_path
                 captured["options"] = options
 
             with (
                 patch.object(installer, "ROOT", source),
                 patch.object(installer.sys, "argv", ["install.py", "--no-enable"]),
                 patch.object(installer, "resolve_hermes_home", return_value=profile),
-                patch.object(installer, "install_bundle", side_effect=capture),
+                patch.object(installer, "install_profile_bundle", side_effect=capture),
                 patch("builtins.print"),
             ):
                 result = installer.main()
 
             self.assertEqual(result, 0)
-            self.assertEqual(
-                captured["targets"],
-                [(source, profile / "plugins" / "lyrics-for-hermes")],
-            )
-            self.assertEqual(
-                captured["options"]["obsolete_targets"],
-                [
-                    profile / "plugins" / "apple-music-lyrics",
-                    profile / "desktop-plugins" / "apple-music-lyrics",
-                    profile / "plugin-data" / "apple-music-lyrics",
-                ],
-            )
+            self.assertEqual(captured["source"], source)
+            self.assertEqual(captured["profile"], profile)
+            self.assertFalse(captured["options"]["link"])
+            self.assertFalse(captured["options"]["force"])
 
     def test_activation_updates_enabled_ids_without_plugin_discovery(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -441,7 +767,7 @@ class InstallerTests(unittest.TestCase):
             ):
                 result = installer._activate_plugin("/usr/local/bin/hermes", profile)
 
-            self.assertEqual(result, 0)
+            self.assertTrue(callable(result))
             self.assertEqual(
                 [call[0][1:] for call in calls],
                 [
@@ -593,7 +919,7 @@ class InstallerTests(unittest.TestCase):
             with (
                 patch.object(installer.sys, "argv", ["install.py"]),
                 patch.object(installer, "resolve_hermes_home", return_value=profile),
-                patch.object(installer, "install_bundle", side_effect=install),
+                patch.object(installer, "install_profile_bundle", side_effect=install),
                 patch.object(installer.shutil, "which", return_value="hermes"),
                 patch.object(installer, "_profile_home_from_cli", return_value=profile.resolve()),
                 patch.object(installer, "_activate_plugin", side_effect=activate),
@@ -609,7 +935,11 @@ class InstallerTests(unittest.TestCase):
             with (
                 patch.object(installer.sys, "argv", ["install.py"]),
                 patch.object(installer, "resolve_hermes_home", return_value=profile),
-                patch.object(installer, "install_bundle", side_effect=OSError("failed")),
+                patch.object(
+                    installer,
+                    "install_profile_bundle",
+                    side_effect=OSError("failed"),
+                ),
                 patch.object(installer, "_activate_plugin") as activate,
                 patch("builtins.print"),
             ):

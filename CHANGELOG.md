@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.1] - 2026-08-30
+
+### Security
+
+- Copy-mode installation now rejects every symlink in the source tree before replacing an existing plugin, preventing external files from being dereferenced into the installed payload.
+- Copy-mode installation now excludes alternate virtualenv names, marker-based virtualenvs, Hermes metadata, and common Python development caches.
+
 ## [0.3.0] - 2026-08-30
 
 ### Removed
