@@ -39,7 +39,7 @@ else:
     from apple_music_lyrics_backend.music import MusicClient
     from apple_music_lyrics_backend.service import LyricsService
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PLUGIN_ID = "lyrics-for-hermes"
 DISPLAY_NAME = "Lyrics for Hermes"
 _NO_STORE = {"Cache-Control": "private, no-store"}

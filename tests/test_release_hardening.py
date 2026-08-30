@@ -110,7 +110,7 @@ class ReleaseHardeningContractTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            {project["version"], manifest["version"], plugin_version}, {"0.3.0"}
+            {project["version"], manifest["version"], plugin_version}, {"0.3.1"}
         )
         self.assertEqual(project["name"], "hermes-lyrics")
         self.assertEqual(project["dependencies"], ["fastapi==0.141.1"])
@@ -121,10 +121,13 @@ class ReleaseHardeningContractTests(unittest.TestCase):
         )
         self.assertEqual(manifest["name"], "lyrics-for-hermes")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn("## [0.3.0]", changelog)
+        self.assertIn("## [0.3.1]", changelog)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("No PyPI/wheel release is published or supported", readme)
         self.assertIn("GitHub source archives", readme)
+
+    def test_release_payload_does_not_ship_profile_environment(self):
+        self.assertFalse((ROOT / ".hermes" / "environment.json").exists())
 
     def test_sbom_contains_project_and_every_locked_component_without_ffmpeg(self):
         sbom = json.loads((ROOT / "SBOM.json").read_text(encoding="utf-8"))
@@ -153,7 +156,7 @@ class ReleaseHardeningContractTests(unittest.TestCase):
             if "version" in package and (path or "name" in package)
         }
         actual = {(component["name"], component["version"]) for component in sbom["components"]}
-        self.assertIn(("hermes-lyrics", "0.3.0"), actual)
+        self.assertIn(("hermes-lyrics", "0.3.1"), actual)
         self.assertTrue(python_components <= actual)
         self.assertTrue(npm_components <= actual)
         self.assertFalse(any("ffmpeg" in name.casefold() for name, _version in actual))

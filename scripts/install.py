@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,178 @@ from pathlib import Path
 PLUGIN_ID = "lyrics-for-hermes"
 LEGACY_PLUGIN_ID = "apple-music-lyrics"
 ROOT = Path(__file__).resolve().parents[1]
+
+_DEVELOPMENT_ARTIFACT_NAMES = {
+    ".DS_Store",
+    ".cache",
+    ".git",
+    ".hermes",
+    ".mypy_cache",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    "__pycache__",
+    "build",
+    "node_modules",
+    "wheelhouse",
+}
+
+# The published plugin has a deliberately explicit payload boundary. Fixtures
+# using the public install_target API retain the generic secure copier below.
+_RUNTIME_TOP_LEVEL = {
+    "CHANGELOG.md", "LICENSE", "README.md", "SBOM.json", "THIRD_PARTY_NOTICES.md",
+    "__init__.py", "dashboard", "desktop", "package-lock.json", "package.json",
+    "plugin.yaml", "pyproject.toml", "requirements-ci.in", "requirements-ci.lock", "scripts",
+}
+
+
+def _reject_source_symlinks(source: Path) -> None:
+    """Fail closed instead of copying data outside the reviewed source tree."""
+    if source.is_symlink():
+        raise RuntimeError(f"source tree contains a symlink: {source}")
+    for directory, directory_names, file_names in os.walk(source, followlinks=False):
+        parent = Path(directory)
+        for name in (*directory_names, *file_names):
+            candidate = parent / name
+            if candidate.is_symlink():
+                raise RuntimeError(f"source tree contains a symlink: {candidate}")
+
+
+def _unsafe_source_entry(path: str) -> RuntimeError:
+    return RuntimeError(f"unsafe source entry: {path}")
+
+
+def _directory_has_pyvenv(directory_fd: int) -> bool:
+    try:
+        return stat.S_ISREG(os.stat("pyvenv.cfg", dir_fd=directory_fd, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _copy_source_tree_to_fd(source: Path, destination_fd: int) -> None:
+    """Copy source via no-follow descriptors into an already-open directory."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(source, directory_flags)
+    except OSError as exc:
+        raise _unsafe_source_entry(str(source)) from exc
+    restrict_to_runtime = source.resolve() == ROOT.resolve()
+
+    def copy_directory(source_fd: int, output_fd: int, relative: tuple[str, ...]) -> None:
+        for name in os.listdir(source_fd):
+            if (
+                (not relative and restrict_to_runtime and name not in _RUNTIME_TOP_LEVEL)
+                or _is_development_artifact(Path(name))
+            ):
+                continue
+            child_relative = (*relative, name)
+            display = "/".join(child_relative)
+            try:
+                entry = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise _unsafe_source_entry(display) from exc
+            if stat.S_ISDIR(entry.st_mode):
+                try:
+                    child_fd = os.open(name, directory_flags, dir_fd=source_fd)
+                except OSError as exc:
+                    raise _unsafe_source_entry(display) from exc
+                try:
+                    opened_directory = os.fstat(child_fd)
+                    if (
+                        opened_directory.st_dev != entry.st_dev
+                        or opened_directory.st_ino != entry.st_ino
+                    ):
+                        raise _unsafe_source_entry(display)
+                    if _is_development_artifact(Path(name)) or _directory_has_pyvenv(child_fd):
+                        continue
+                    os.mkdir(name, stat.S_IMODE(entry.st_mode) & 0o755, dir_fd=output_fd)
+                    output_child_fd = os.open(name, directory_flags, dir_fd=output_fd)
+                    try:
+                        copy_directory(child_fd, output_child_fd, child_relative)
+                    finally:
+                        os.close(output_child_fd)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(entry.st_mode):
+                try:
+                    file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
+                except OSError as exc:
+                    raise _unsafe_source_entry(display) from exc
+                try:
+                    opened_file = os.fstat(file_fd)
+                    if (
+                        not stat.S_ISREG(opened_file.st_mode)
+                        or opened_file.st_dev != entry.st_dev
+                        or opened_file.st_ino != entry.st_ino
+                    ):
+                        raise _unsafe_source_entry(display)
+                    output_file_fd = os.open(
+                        name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        stat.S_IMODE(entry.st_mode) & 0o755,
+                        dir_fd=output_fd,
+                    )
+                    try:
+                        with (
+                            os.fdopen(file_fd, "rb", closefd=False) as input_file,
+                            os.fdopen(output_file_fd, "wb", closefd=False) as output_file,
+                        ):
+                            shutil.copyfileobj(input_file, output_file)
+                        completed_file = os.fstat(file_fd)
+                        if (
+                            completed_file.st_size != opened_file.st_size
+                            or completed_file.st_mtime_ns != opened_file.st_mtime_ns
+                            or completed_file.st_ctime_ns != opened_file.st_ctime_ns
+                        ):
+                            raise _unsafe_source_entry(display)
+                    finally:
+                        os.close(output_file_fd)
+                finally:
+                    os.close(file_fd)
+            else:
+                raise _unsafe_source_entry(display)
+
+    try:
+        copy_directory(root_fd, destination_fd, ())
+    finally:
+        os.close(root_fd)
+
+
+def _copy_source_tree(source: Path, destination: Path) -> None:
+    """Copy source into a new directory through descriptor-anchored I/O."""
+    destination.mkdir()
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        _copy_source_tree_to_fd(source, destination_fd)
+    finally:
+        os.close(destination_fd)
+
+
+def _is_development_artifact(path: Path) -> bool:
+    name = path.name.casefold()
+    normalized = name.lstrip(".")
+    virtualenv_name = (
+        normalized == "venv"
+        or normalized.startswith("venv-")
+        or normalized.startswith("venv_")
+        or normalized.endswith("-venv")
+        or normalized.endswith("_venv")
+    )
+    return (
+        name in _DEVELOPMENT_ARTIFACT_NAMES
+        or name.endswith((".egg-info", ".dist-info"))
+        or virtualenv_name
+        or (path.is_dir() and (path / "pyvenv.cfg").is_file())
+    )
+
+
+def _ignore_development_artifacts(directory: str, names: list[str]) -> set[str]:
+    parent = Path(directory)
+    return {name for name in names if _is_development_artifact(parent / name)}
 
 
 def remove_target(path: Path) -> None:
@@ -272,20 +446,7 @@ def _prepare_targets(
             if link:
                 plan.staged.symlink_to(source.resolve(), target_is_directory=True)
             else:
-                shutil.copytree(
-                    source,
-                    plan.staged,
-                    ignore=shutil.ignore_patterns(
-                        ".git",
-                        ".venv",
-                        ".ruff_cache",
-                        "build",
-                        "node_modules",
-                        "__pycache__",
-                        ".DS_Store",
-                        "*.egg-info",
-                    ),
-                )
+                _copy_source_tree(source, plan.staged)
     except Exception:
         _cleanup_prepared(prepared)
         raise
@@ -410,6 +571,210 @@ def install_target(source: Path, target: Path, link: bool, force: bool) -> None:
     install_bundle([(source, target)], link=link, force=force)
 
 
+def _entry_exists(parent_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _remove_entry_at(parent_fd: int, name: str) -> None:
+    entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISDIR(entry.st_mode):
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise RuntimeError("platform cannot safely remove an anchored directory tree")
+        shutil.rmtree(name, dir_fd=parent_fd)
+    else:
+        os.unlink(name, dir_fd=parent_fd)
+
+
+def _unused_entry_name(parent_fd: int, prefix: str) -> str:
+    for _ in range(32):
+        name = f".{prefix}-{secrets.token_hex(8)}"
+        if not _entry_exists(parent_fd, name):
+            return name
+    raise RuntimeError("could not allocate a private installer entry")
+
+
+def _open_profile_subdirectory(home_fd: int, name: str) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        return os.open(name, flags, dir_fd=home_fd)
+    except FileNotFoundError:
+        os.mkdir(name, 0o700, dir_fd=home_fd)
+        return os.open(name, flags, dir_fd=home_fd)
+    except OSError as exc:
+        raise RuntimeError(f"profile directory is not a safe local directory: {name}") from exc
+
+
+def _assert_profile_anchor(home_fd: int, name: str, directory_fd: int) -> None:
+    try:
+        current = os.stat(name, dir_fd=home_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError(f"profile directory changed during installation: {name}") from exc
+    anchored = os.fstat(directory_fd)
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != anchored.st_dev
+        or current.st_ino != anchored.st_ino
+    ):
+        raise RuntimeError(f"profile directory changed during installation: {name}")
+
+
+def install_profile_bundle(
+    source: Path,
+    hermes_home: Path,
+    *,
+    link: bool,
+    force: bool,
+    activate: Callable[[], object] | None = None,
+) -> None:
+    """Install through stable profile directory descriptors with transactional rollback."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        home_fd = os.open(hermes_home, directory_flags)
+    except OSError as exc:
+        raise RuntimeError("selected Hermes profile is not a safe local directory") from exc
+
+    directory_fds: dict[str, int] = {}
+    stage_name: str | None = None
+    canonical_backup: str | None = None
+    canonical_committed = False
+    legacy_backups: list[tuple[int, str, str]] = []
+    activation_rollback: Callable[[], object] | None = None
+    plugins_fd = -1
+    target_existed = False
+    already_linked = False
+    try:
+        for name in ("plugins", "desktop-plugins", "plugin-data"):
+            directory_fds[name] = _open_profile_subdirectory(home_fd, name)
+        plugins_fd = directory_fds["plugins"]
+        for name, descriptor in directory_fds.items():
+            _assert_profile_anchor(home_fd, name, descriptor)
+
+        target_existed = _entry_exists(plugins_fd, PLUGIN_ID)
+        if target_existed and link:
+            try:
+                already_linked = Path(os.readlink(PLUGIN_ID, dir_fd=plugins_fd)).resolve() == source.resolve()
+            except OSError:
+                already_linked = False
+        if target_existed and not force and not already_linked:
+            raise RuntimeError(
+                f"{hermes_home / 'plugins' / PLUGIN_ID} already exists; "
+                "rerun with --force to replace it"
+            )
+
+        if not already_linked:
+            stage_name = _unused_entry_name(plugins_fd, f"{PLUGIN_ID}.install")
+            if link:
+                os.symlink(source.resolve(), stage_name, target_is_directory=True, dir_fd=plugins_fd)
+            else:
+                os.mkdir(stage_name, 0o700, dir_fd=plugins_fd)
+                staged_fd = os.open(stage_name, directory_flags, dir_fd=plugins_fd)
+                try:
+                    _copy_source_tree_to_fd(source, staged_fd)
+                finally:
+                    os.close(staged_fd)
+
+        for name, descriptor in directory_fds.items():
+            _assert_profile_anchor(home_fd, name, descriptor)
+
+        for directory_name, descriptor in (
+            ("plugins", directory_fds["plugins"]),
+            ("desktop-plugins", directory_fds["desktop-plugins"]),
+            ("plugin-data", directory_fds["plugin-data"]),
+        ):
+            if not _entry_exists(descriptor, LEGACY_PLUGIN_ID):
+                continue
+            backup = _unused_entry_name(descriptor, f"{LEGACY_PLUGIN_ID}.previous")
+            os.rename(
+                LEGACY_PLUGIN_ID,
+                backup,
+                src_dir_fd=descriptor,
+                dst_dir_fd=descriptor,
+            )
+            legacy_backups.append((descriptor, LEGACY_PLUGIN_ID, backup))
+
+        if not already_linked:
+            if target_existed:
+                canonical_backup = _unused_entry_name(plugins_fd, f"{PLUGIN_ID}.previous")
+                os.rename(
+                    PLUGIN_ID,
+                    canonical_backup,
+                    src_dir_fd=plugins_fd,
+                    dst_dir_fd=plugins_fd,
+                )
+            assert stage_name is not None
+            os.rename(stage_name, PLUGIN_ID, src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+            stage_name = None
+            canonical_committed = True
+
+        for name, descriptor in directory_fds.items():
+            _assert_profile_anchor(home_fd, name, descriptor)
+        if activate is not None:
+            activation_result = activate()
+            if callable(activation_result):
+                activation_rollback = activation_result
+        for name, descriptor in directory_fds.items():
+            _assert_profile_anchor(home_fd, name, descriptor)
+
+    except Exception as operation_error:
+        rollback_error: Exception | None = None
+        activation_rollback_error: Exception | None = None
+        if activation_rollback is not None:
+            try:
+                activation_rollback()
+                activation_rollback = None
+            except Exception as exc:
+                activation_rollback_error = exc
+        try:
+            if canonical_committed and _entry_exists(plugins_fd, PLUGIN_ID):
+                _remove_entry_at(plugins_fd, PLUGIN_ID)
+            if canonical_backup is not None and _entry_exists(plugins_fd, canonical_backup):
+                os.rename(
+                    canonical_backup,
+                    PLUGIN_ID,
+                    src_dir_fd=plugins_fd,
+                    dst_dir_fd=plugins_fd,
+                )
+                canonical_backup = None
+            if stage_name is not None and _entry_exists(plugins_fd, stage_name):
+                _remove_entry_at(plugins_fd, stage_name)
+                stage_name = None
+            for descriptor, original, backup in reversed(legacy_backups):
+                if _entry_exists(descriptor, original):
+                    raise RuntimeError(f"legacy plugin path reappeared during rollback: {original}")
+                if _entry_exists(descriptor, backup):
+                    os.rename(backup, original, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+        except Exception as exc:
+            rollback_error = exc
+        if rollback_error is not None or activation_rollback_error is not None:
+            raise RuntimeError(
+                "profile installation failed and rollback was incomplete: "
+                f"activation={activation_rollback_error}; filesystem={rollback_error}"
+            ) from operation_error
+        raise
+    else:
+        if canonical_backup is not None and _entry_exists(plugins_fd, canonical_backup):
+            _remove_entry_at(plugins_fd, canonical_backup)
+        for descriptor, _original, backup in legacy_backups:
+            if _entry_exists(descriptor, backup):
+                _remove_entry_at(descriptor, backup)
+    finally:
+        for descriptor in directory_fds.values():
+            os.close(descriptor)
+        os.close(home_fd)
+
+    target = hermes_home / "plugins" / PLUGIN_ID
+    if already_linked:
+        print(f"Already linked: {target}")
+    elif link:
+        print(f"Linked {target} -> {source.resolve()}")
+    else:
+        print(f"Copied {source} -> {target}")
+
+
 def _enabled_plugins(hermes: str, environment: dict[str, str]) -> list[str]:
     completed = subprocess.run(
         [hermes, "config", "get", "--json", "plugins.enabled"],
@@ -451,7 +816,7 @@ def _set_enabled_plugins(
     return completed.returncode == 0
 
 
-def _activate_plugin(hermes: str, hermes_home: Path) -> int:
+def _activate_plugin(hermes: str, hermes_home: Path) -> Callable[[], object]:
     environment = os.environ.copy()
     environment["HERMES_HOME"] = str(hermes_home)
     active_home = _profile_home_from_cli(hermes, environment=environment)
@@ -465,7 +830,7 @@ def _activate_plugin(hermes: str, hermes_home: Path) -> int:
     if PLUGIN_ID not in updated:
         updated.append(PLUGIN_ID)
     if updated == previous:
-        return 0
+        return lambda: None
 
     if not _set_enabled_plugins(hermes, environment, updated):
         if not _set_enabled_plugins(hermes, environment, previous):
@@ -483,7 +848,15 @@ def _activate_plugin(hermes: str, hermes_home: Path) -> int:
         if not _set_enabled_plugins(hermes, environment, previous):
             raise RuntimeError("enabled-plugin verification failed and rollback was incomplete")
         raise RuntimeError("enabled-plugin verification failed")
-    return 0
+
+    def rollback_activation() -> None:
+        if not _set_enabled_plugins(hermes, environment, previous):
+            raise RuntimeError("enabled-plugin rollback failed")
+        restored = _enabled_plugins(hermes, environment)
+        if restored != previous:
+            raise RuntimeError("enabled-plugin rollback verification failed")
+
+    return rollback_activation
 
 
 def main() -> int:
@@ -521,11 +894,17 @@ def main() -> int:
             return 2
 
     try:
-        install_bundle(
-            [(ROOT, plugin_target)],
+        # Re-open all profile ancestors immediately before the transaction. This
+        # closes the validation/use gap if another process changed a component.
+        _validate_profile_target_ancestors(
+            hermes_home,
+            [plugin_target, *legacy_targets],
+        )
+        install_profile_bundle(
+            ROOT,
+            hermes_home,
             link=args.link,
             force=args.force,
-            obsolete_targets=legacy_targets,
             activate=(lambda: _activate_plugin(hermes, hermes_home)) if hermes else None,
         )
     except (OSError, RuntimeError) as exc:
